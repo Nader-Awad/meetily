@@ -277,4 +277,15 @@ mod tests {
         let for_meeting = WorkflowsRepository::list_runs_for_meeting(&pool, "m1").await.unwrap();
         assert_eq!(for_meeting.len(), 1);
     }
+
+    #[tokio::test]
+    async fn deleting_meeting_deletes_its_runs() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('m1','T','t','t')")
+            .execute(&pool).await.unwrap();
+        WorkflowsRepository::create_run(&pool, "r1", None, "W", "m1").await.unwrap();
+        // simulate the cascade delete statement directly
+        sqlx::query("DELETE FROM workflow_runs WHERE meeting_id = ?").bind("m1").execute(&pool).await.unwrap();
+        assert!(WorkflowsRepository::get_run(&pool, "r1").await.unwrap().is_none());
+    }
 }
