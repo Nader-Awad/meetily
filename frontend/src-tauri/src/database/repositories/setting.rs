@@ -24,6 +24,14 @@ pub struct SaveTranscriptConfigRequest {
 
 pub struct SettingsRepository;
 
+#[derive(Debug, Clone, Default)]
+pub struct NeoHiveSettings {
+    pub endpoint: Option<String>,
+    pub access_client_id: Option<String>,
+    pub access_client_secret: Option<String>,
+    pub enabled: bool,
+}
+
 // Transcript providers: localWhisper, deepgram, elevenLabs, groq, openai
 // Summary providers: openai, claude, ollama, groq, added openrouter
 // NOTE: Handle data exclusion in the higher layer as this is database abstraction layer(using SELECT *)
@@ -344,5 +352,105 @@ impl SettingsRepository {
         .await?;
 
         Ok(())
+    }
+
+    // ===== NEOHIVE CONNECTION SETTINGS =====
+
+    /// Gets the NeoHive connection settings (endpoint, Cloudflare Access service-token
+    /// client ID/secret, enabled flag)
+    ///
+    /// # Returns
+    /// * `Ok(NeoHiveSettings)` - Stored config, or defaults if no row exists yet
+    /// * `Err(sqlx::Error)` - Database error
+    pub async fn get_neohive_config(
+        pool: &SqlitePool,
+    ) -> std::result::Result<NeoHiveSettings, sqlx::Error> {
+        let row: Option<(Option<String>, Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
+            "SELECT neohiveEndpoint, neohiveAccessClientId, neohiveAccessClientSecret, neohiveEnabled FROM settings WHERE id = '1' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await?;
+        Ok(match row {
+            Some((endpoint, access_client_id, access_client_secret, enabled)) => NeoHiveSettings {
+                endpoint,
+                access_client_id,
+                access_client_secret,
+                enabled: enabled.unwrap_or(0) != 0,
+            },
+            None => NeoHiveSettings::default(),
+        })
+    }
+
+    /// Saves the NeoHive connection settings, upserting the single settings row (id = '1')
+    ///
+    /// # Returns
+    /// * `Ok(())` - Config saved successfully
+    /// * `Err(sqlx::Error)` - Database error
+    pub async fn save_neohive_config(
+        pool: &SqlitePool,
+        endpoint: Option<&str>,
+        access_client_id: Option<&str>,
+        access_client_secret: Option<&str>,
+        enabled: bool,
+    ) -> std::result::Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO settings (id, provider, model, whisperModel, neohiveEndpoint, neohiveAccessClientId, neohiveAccessClientSecret, neohiveEnabled)
+            VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                neohiveEndpoint = excluded.neohiveEndpoint,
+                neohiveAccessClientId = excluded.neohiveAccessClientId,
+                neohiveAccessClientSecret = excluded.neohiveAccessClientSecret,
+                neohiveEnabled = excluded.neohiveEnabled
+            "#,
+        )
+        .bind(endpoint)
+        .bind(access_client_id)
+        .bind(access_client_secret)
+        .bind(if enabled { 1_i64 } else { 0_i64 })
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod neohive_settings_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::SqlitePool;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn save_then_get_neohive_config() {
+        let pool = test_pool().await;
+        SettingsRepository::save_neohive_config(
+            &pool,
+            Some("https://neohive.logilica.com/projects/x/mcp"),
+            Some("client-id-abc"),
+            Some("client-secret-xyz"),
+            true,
+        ).await.unwrap();
+        let cfg = SettingsRepository::get_neohive_config(&pool).await.unwrap();
+        assert_eq!(cfg.endpoint.as_deref(), Some("https://neohive.logilica.com/projects/x/mcp"));
+        assert_eq!(cfg.access_client_id.as_deref(), Some("client-id-abc"));
+        assert_eq!(cfg.access_client_secret.as_deref(), Some("client-secret-xyz"));
+        assert!(cfg.enabled);
+    }
+
+    #[tokio::test]
+    async fn get_neohive_config_defaults_when_unset() {
+        let pool = test_pool().await;
+        let cfg = SettingsRepository::get_neohive_config(&pool).await.unwrap();
+        assert!(cfg.endpoint.is_none());
+        assert!(cfg.access_client_id.is_none());
+        assert!(cfg.access_client_secret.is_none());
+        assert!(!cfg.enabled);
     }
 }
