@@ -12,6 +12,7 @@ export function useWorkflowRuns(meetingId: string | undefined) {
   const [isLoading, setIsLoading] = useState(false);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!meetingId) return;
@@ -26,26 +27,32 @@ export function useWorkflowRuns(meetingId: string | undefined) {
     }
   }, [meetingId]);
 
-  useEffect(() => {
-    refresh();
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [refresh]);
-
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
     setActiveRunId(null);
+    activeRunIdRef.current = null;
   }, []);
+
+  useEffect(() => {
+    refresh();
+    return () => {
+      stopPolling();
+    };
+  }, [refresh, stopPolling]);
 
   const startPolling = useCallback((runId: string) => {
     if (pollRef.current) clearInterval(pollRef.current);
     setActiveRunId(runId);
+    activeRunIdRef.current = runId;
     let count = 0;
     pollRef.current = setInterval(async () => {
+      if (activeRunIdRef.current !== runId) {
+        if (pollRef.current) clearInterval(pollRef.current);
+        return;
+      }
       count += 1;
       if (count >= MAX_POLLS) {
         stopPolling();
@@ -93,7 +100,7 @@ export function useWorkflowRuns(meetingId: string | undefined) {
   const cancelRun = useCallback(async (runId: string) => {
     try {
       await invokeTauri<boolean>('api_cancel_workflow_run', { runId });
-      stopPolling();
+      if (activeRunIdRef.current === runId) stopPolling();
       await refresh();
     } catch (err) {
       console.error('Failed to cancel run:', err);
