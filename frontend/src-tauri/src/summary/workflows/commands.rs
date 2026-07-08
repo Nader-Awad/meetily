@@ -1,9 +1,14 @@
+use crate::database::repositories::meeting::MeetingsRepository;
+use crate::database::repositories::setting::SettingsRepository;
+use crate::neohive::NeoHiveClient;
 use crate::state::AppState;
-use crate::summary::workflows::models::{Workflow, WorkflowInput, WorkflowRun};
+use crate::summary::workflows::models::{NeoHiveExportConfig, Workflow, WorkflowInput, WorkflowRun};
 use crate::summary::workflows::repository::WorkflowsRepository;
 use crate::summary::workflows::runner;
+use crate::summary::workflows::sections::{memory_type_for, ParsedSection};
 use log::{error as log_error, info as log_info};
 use serde::Serialize;
+use sqlx::SqlitePool;
 use tauri::{AppHandle, Runtime};
 
 #[tauri::command]
@@ -127,12 +132,135 @@ pub async fn api_cancel_workflow_run(run_id: String) -> Result<bool, String> {
     Ok(runner::cancel_run(&run_id))
 }
 
+/// One memory to push: (content, memory_type, tags).
+#[derive(Debug, PartialEq)]
+pub struct ExportItem {
+    pub content: String,
+    pub mem_type: String,
+    pub tags: Vec<String>,
+}
+
+/// Pure: turns parsed sections + config + context into export items (skips empty sections).
+pub(crate) fn build_export_items(
+    sections: &[ParsedSection],
+    cfg: &NeoHiveExportConfig,
+    meeting_title: &str,
+    workflow_name: &str,
+) -> Vec<ExportItem> {
+    sections
+        .iter()
+        .filter(|s| !s.content.trim().is_empty())
+        .map(|s| ExportItem {
+            content: format!("{}\n\n{}", s.title, s.content),
+            mem_type: memory_type_for(&s.title, cfg),
+            tags: vec![
+                meeting_title.to_string(),
+                workflow_name.to_string(),
+                s.title.clone(),
+                "meetily".to_string(),
+            ],
+        })
+        .collect()
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResult {
+    pub pushed: usize,
+    pub failed: usize,
+}
+
+/// Exports a completed run's sections to NeoHive. Shared by the manual command
+/// and the auto-export hook. Sends over the Cloudflare Access service token.
+pub(crate) async fn export_run(pool: &SqlitePool, run_id: &str) -> Result<ExportResult, String> {
+    let run = WorkflowsRepository::get_run(pool, run_id)
+        .await.map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Run '{}' not found", run_id))?;
+    if run.status != "completed" {
+        return Err("Only completed runs can be exported".to_string());
+    }
+
+    let sections: Vec<ParsedSection> = run.result_sections.as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    if sections.is_empty() {
+        return Err("This run has no sections to export".to_string());
+    }
+
+    let neo = SettingsRepository::get_neohive_config(pool).await.map_err(|e| e.to_string())?;
+    if !neo.enabled {
+        return Err("NeoHive export is disabled in Settings".to_string());
+    }
+    let endpoint = neo.endpoint.ok_or("NeoHive endpoint is not configured")?;
+    let client_id = neo.access_client_id.ok_or("NeoHive Access Client Id is not configured")?;
+    let client_secret = neo.access_client_secret.ok_or("NeoHive Access Client Secret is not configured")?;
+
+    // Per-workflow export config (type overrides, importance).
+    let export_cfg = match &run.workflow_id {
+        Some(id) => WorkflowsRepository::get_workflow(pool, id).await.ok().flatten()
+            .map(|w| w.neohive_config()).unwrap_or_default(),
+        None => NeoHiveExportConfig::default(),
+    };
+
+    // Meeting title for tagging. `MeetingsRepository::get_meeting_by_id` (the brief's
+    // guess) does not exist. The real lightweight getter (no transcripts joined) is
+    // `get_meeting_metadata`, returning `Result<Option<MeetingModel>, sqlx::Error>`
+    // where `MeetingModel.title: String`.
+    let meeting_title = MeetingsRepository::get_meeting_metadata(pool, &run.meeting_id)
+        .await.ok().flatten().map(|m| m.title).unwrap_or_else(|| "Meeting".to_string());
+
+    let items = build_export_items(&sections, &export_cfg, &meeting_title, &run.workflow_name);
+    let client = NeoHiveClient::new(endpoint, client_id, client_secret);
+
+    let mut pushed = 0usize;
+    let mut failed = 0usize;
+    for item in &items {
+        match client.store_memory(&item.content, &item.mem_type, &item.tags, export_cfg.importance).await {
+            Ok(()) => pushed += 1,
+            Err(e) => { log_error!("NeoHive export item failed: {}", e); failed += 1; }
+        }
+    }
+
+    let status = if failed == 0 { "pushed" } else if pushed == 0 { "failed" } else { "partial" };
+    let _ = WorkflowsRepository::set_run_neohive_status(pool, run_id, status).await;
+
+    Ok(ExportResult { pushed, failed })
+}
+
+#[tauri::command]
+pub async fn api_export_run_to_neohive(
+    state: tauri::State<'_, AppState>,
+    run_id: String,
+) -> Result<ExportResult, String> {
+    log_info!("api_export_run_to_neohive called (run {})", run_id);
+    export_run(state.db_manager.pool(), &run_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use crate::summary::workflows::models::{NeoHiveExportConfig, WorkflowInput};
     use crate::summary::workflows::repository::WorkflowsRepository;
     use sqlx::sqlite::SqlitePoolOptions;
     use sqlx::SqlitePool;
+
+    #[test]
+    fn build_export_items_skips_empty_and_maps_types() {
+        use crate::summary::workflows::sections::ParsedSection;
+        use crate::summary::workflows::models::NeoHiveExportConfig;
+        use std::collections::HashMap;
+        let mut overrides = HashMap::new();
+        overrides.insert("Key Decisions".to_string(), "decision".to_string());
+        let cfg = NeoHiveExportConfig { section_type_overrides: overrides, ..Default::default() };
+        let sections = vec![
+            ParsedSection { title: "Summary".into(), content: "hi".into() },
+            ParsedSection { title: "Key Decisions".into(), content: "  ".into() }, // empty -> skipped
+        ];
+        let items = super::build_export_items(&sections, &cfg, "Sprint", "Exec");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].mem_type, "narrative");
+        assert!(items[0].tags.contains(&"meetily".to_string()));
+        assert!(items[0].content.starts_with("Summary"));
+    }
 
     async fn test_pool() -> SqlitePool {
         let pool = SqlitePoolOptions::new().max_connections(1)

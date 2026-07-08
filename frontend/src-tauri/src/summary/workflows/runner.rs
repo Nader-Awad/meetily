@@ -66,10 +66,22 @@ pub async fn run_workflow_background<R: tauri::Runtime>(
     match result {
         Ok((final_markdown, section_titles)) => {
             let sections_json = build_sections_json(&final_markdown, &section_titles);
-            if let Err(e) = WorkflowsRepository::complete_run(
+            match WorkflowsRepository::complete_run(
                 &pool, &run_id, &final_markdown, &sections_json, WorkflowRunStatus::COMPLETED,
             ).await {
-                error!("Failed to persist completed workflow run {}: {}", run_id, e);
+                Ok(()) => {
+                    // `workflow` is only borrowed by `generate_for_workflow` above, so
+                    // it's still owned here — read its export config for the auto-export hook.
+                    let cfg = workflow.neohive_config();
+                    if cfg.enabled && cfg.auto_export {
+                        if let Err(e) = crate::summary::workflows::commands::export_run(&pool, &run_id).await {
+                            tracing::warn!("Auto-export to NeoHive failed for run {}: {}", run_id, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to persist completed workflow run {}: {}", run_id, e);
+                }
             }
         }
         Err(e) => {
