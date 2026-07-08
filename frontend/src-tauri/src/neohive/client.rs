@@ -26,13 +26,39 @@ pub(crate) fn build_store_params(
     })
 }
 
+/// Interprets a JSON-RPC tools/call response: Err on a top-level protocol
+/// error OR a tool-level `result.isError == true` (message pulled from
+/// result.content text). Ok(()) only on a genuine success.
+pub(crate) fn interpret_tool_response(parsed: &serde_json::Value) -> Result<(), String> {
+    if let Some(err) = parsed.get("error") {
+        return Err(format!("NeoHive memory_store error: {}", err));
+    }
+    if let Some(result) = parsed.get("result") {
+        let is_error = result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+        if is_error {
+            let msg = result.get("content")
+                .and_then(|c| c.as_array())
+                .map(|items| items.iter()
+                    .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>().join("; "))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "tool reported isError with no content".to_string());
+            return Err(format!("NeoHive memory_store failed: {}", msg));
+        }
+    }
+    Ok(())
+}
+
 impl NeoHiveClient {
     pub fn new(endpoint: String, access_client_id: String, access_client_secret: String) -> Self {
         Self {
             endpoint,
             access_client_id,
             access_client_secret,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             session_id: tokio::sync::Mutex::new(None),
         }
     }
@@ -90,18 +116,23 @@ impl NeoHiveClient {
             .and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
         let text = resp.text().await.map_err(|e| e.to_string())?;
         if !status.is_success() {
-            return Err(format!("NeoHive initialize returned HTTP {} (check the Cloudflare Access service token and endpoint)", status));
+            let snippet: String = text.chars().take(300).collect();
+            return Err(format!("NeoHive initialize returned HTTP {} (check the Cloudflare Access service token and endpoint): {}", status, snippet));
         }
         // Surfaces auth/protocol errors early.
         let parsed = Self::parse_body(&ct, &text)?;
         if let Some(err) = parsed.get("error") {
             return Err(format!("NeoHive initialize error: {}", err));
         }
-        if let Some(sid) = session {
+        if let Some(sid) = &session {
             *self.session_id.lock().await = Some(sid.clone());
-            let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-            let _ = self.base_request().header("mcp-session-id", sid).json(&note).send().await;
         }
+        let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+        let mut note_builder = self.base_request();
+        if let Some(sid) = session {
+            note_builder = note_builder.header("mcp-session-id", sid);
+        }
+        let _ = note_builder.json(&note).send().await;
         Ok(())
     }
 
@@ -117,9 +148,8 @@ impl NeoHiveClient {
         let req_body = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params });
 
         let mut builder = self.base_request();
-        if let Some(sid) = self.session_id.lock().await.clone() {
-            builder = builder.header("mcp-session-id", sid);
-        }
+        let sid_opt = self.session_id.lock().await.clone();
+        if let Some(sid) = sid_opt { builder = builder.header("mcp-session-id", sid); }
         let resp = builder.json(&req_body).send().await
             .map_err(|e| format!("NeoHive memory_store request failed: {}", e))?;
         let status = resp.status();
@@ -127,12 +157,11 @@ impl NeoHiveClient {
             .and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
         let text = resp.text().await.map_err(|e| e.to_string())?;
         if !status.is_success() {
-            return Err(format!("NeoHive returned HTTP {}", status));
+            let snippet: String = text.chars().take(300).collect();
+            return Err(format!("NeoHive returned HTTP {}: {}", status, snippet));
         }
         let parsed = Self::parse_body(&ct, &text)?;
-        if let Some(err) = parsed.get("error") {
-            return Err(format!("NeoHive memory_store error: {}", err));
-        }
+        interpret_tool_response(&parsed)?;
         Ok(())
     }
 }
@@ -149,5 +178,24 @@ mod tests {
         assert_eq!(p["arguments"]["type"], "insight");
         assert_eq!(p["arguments"]["importance"], 6);
         assert_eq!(p["arguments"]["tags"][0], "a");
+    }
+
+    #[test]
+    fn interpret_tool_response_ok_on_success() {
+        let v = serde_json::json!({"result":{"content":[{"type":"text","text":"stored"}],"isError":false}});
+        assert!(interpret_tool_response(&v).is_ok());
+    }
+
+    #[test]
+    fn interpret_tool_response_err_on_tool_iserror() {
+        let v = serde_json::json!({"result":{"content":[{"type":"text","text":"bad type"}],"isError":true}});
+        let e = interpret_tool_response(&v).unwrap_err();
+        assert!(e.contains("bad type"));
+    }
+
+    #[test]
+    fn interpret_tool_response_err_on_protocol_error() {
+        let v = serde_json::json!({"error":{"code":-32602,"message":"invalid"}});
+        assert!(interpret_tool_response(&v).is_err());
     }
 }
