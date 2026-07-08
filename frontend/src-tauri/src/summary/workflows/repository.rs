@@ -186,6 +186,7 @@ impl WorkflowsRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::repositories::meeting::MeetingsRepository;
     use crate::summary::workflows::models::{NeoHiveExportConfig, WorkflowRunStatus};
     use sqlx::sqlite::SqlitePoolOptions;
 
@@ -284,8 +285,8 @@ mod tests {
         sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('m1','T','t','t')")
             .execute(&pool).await.unwrap();
         WorkflowsRepository::create_run(&pool, "r1", None, "W", "m1").await.unwrap();
-        // simulate the cascade delete statement directly
-        sqlx::query("DELETE FROM workflow_runs WHERE meeting_id = ?").bind("m1").execute(&pool).await.unwrap();
+        // exercise the real cascade-delete path (meeting.rs::delete_meeting_with_transaction)
+        assert!(MeetingsRepository::delete_meeting(&pool, "m1").await.unwrap());
         assert!(WorkflowsRepository::get_run(&pool, "r1").await.unwrap().is_none());
     }
 }
