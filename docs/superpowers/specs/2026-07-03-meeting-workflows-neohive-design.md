@@ -5,6 +5,12 @@
 - **Author:** Nader Awad (with Claude)
 - **Scope:** Frontend (Next.js) + Rust/Tauri core under `frontend/src-tauri/src`. No changes to the archived Python/FastAPI backend. Transcription is untouched and stays fully local.
 
+> **Implementation update (2026-07-08) — as-built deltas vs. this design.** Built and merged into local `main` (personal fork). Notable changes discovered during implementation:
+> - **NeoHive auth (supersedes §6/§7/§11):** `neohive.logilica.com/.../mcp` is behind **Cloudflare Access**, so auth uses a **service token**, not a single token. Settings store `neohiveEndpoint` + `neohiveAccessClientId` + `neohiveAccessClientSecret` + `neohiveEnabled` (migrations `20260703000000` + `20260703000001`); the client sends `CF-Access-Client-Id` / `CF-Access-Client-Secret` headers.
+> - **Transport:** MCP-over-HTTP (`initialize` → `tools/call memory_store`); the client tolerates JSON *and* SSE responses, sends `notifications/initialized`, has a 30 s timeout, and detects tool-level failures via `result.isError` (not just top-level JSON-RPC `error`).
+> - **Run status vocabulary:** `queued | running | completed | error | cancelled` (the earlier "done" wording is superseded). Note: `running` is defined but the current runner transitions `queued`→terminal without emitting `running`.
+> - **v1 scope trims:** per-workflow NeoHive **section→type overrides and importance are stored but not yet editable in the UI** (defaults: Decisions→`decision`, Action Items→`insight`, else `narrative`); per-workflow LLM params (max_tokens/temperature/top_p) are plumbed through types but have no editor UI yet. Both are backlog, not blockers.
+
 ## 1. Problem & motivation
 
 Meetily can already summarize a meeting, choose from templates, use a custom prompt, and route to several LLM providers (Ollama, Claude, OpenAI, Groq, OpenRouter, custom OpenAI). The user wants a **TypeWhisper-style "workflows"** capability: saved, named, one-click tasks that summarize a meeting *in different ways*, each pinned to a chosen model (typically an OpenRouter model), with the results **kept side-by-side** rather than overwriting a single summary. At the end of a run, the produced elements should be **exportable to a NeoHive instance** for reuse in the user's other work.

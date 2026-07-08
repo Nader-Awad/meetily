@@ -8,6 +8,8 @@
 
 **Tech Stack:** Rust, Tauri v2, SQLx (SQLite), `reqwest`, `serde`/`serde_json`, `uuid`, `chrono`, `tokio`, `once_cell`. Crate name `meetily`, lib name `app_lib`.
 
+> **As-built note (2026-07-08).** The NeoHive transport open question (Task 10 probe) resolved to **Cloudflare Access**: the endpoint requires a **service token**, not a single token. So Task 9's single `neohiveApiKey` was superseded by a follow-on migration (`20260703000001`) adding `neohiveAccessClientId` + `neohiveAccessClientSecret` (see the "Task 10b" step in the SDD ledger), and Task 11's client sends `CF-Access-Client-Id` / `CF-Access-Client-Secret` headers, tolerates JSON+SSE, sends `notifications/initialized`, uses a 30 s timeout, and checks `result.isError`. Everything else built as planned. Verified: `cargo test workflows` 16/0, `neohive` 7/0; requires **Xcode** (for the `cidre`/ScreenCaptureKit build).
+
 **Scope:** Backend only. The frontend (Workflows settings manager, run controls, run-result cards) is **Plan 2**, written after this plan. This plan produces working, independently testable software: workflows can be created/listed/deleted, run against a meeting, polled to completion, and exported to NeoHive — all exercised via `cargo test` and manual Tauri command invocation.
 
 ## Global Constraints

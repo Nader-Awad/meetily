@@ -8,6 +8,8 @@
 
 **Tech Stack:** Next.js (App Router), React, TypeScript, Tailwind, shadcn/ui primitives (`Select`, `Popover`, `Command`, `Button`, `Input`, `Switch`, `Tabs`), `sonner` toasts, `@tauri-apps/api/core` `invoke`.
 
+> **As-built note (2026-07-08).** NeoHive auth is a **Cloudflare Access service token**, so the config commands + settings UI use `accessClientId` + `accessClientSecret` (masked with a show/hide toggle), **not** a single `apiKey` — Tasks 1, 2, 7 were implemented from corrected briefs. Two review-driven fixes landed: `WorkflowRunSection` renders for **any meeting with transcripts** (not only after a built-in summary exists), and `useWorkflowRuns` **resumes polling** for an in-progress run after remount/navigation. Backlog (not done in v1): editor UI for per-workflow params (max_tokens/temperature/top_p) and NeoHive section→type overrides; `custom-openai` omitted from the workflow model picker. No frontend test runner exists (`pnpm lint` is broken repo-wide, pre-existing); verified via `tsc --noEmit` + manual review.
+
 **Scope:** Frontend only + one small backend-glue task (Task 1) to expose the NeoHive config commands the UI needs. Assumes Plan 1's commands exist: `api_list_workflows`, `api_save_workflow`, `api_delete_workflow`, `api_run_workflow`, `api_get_workflow_run`, `api_list_workflow_runs`, `api_cancel_workflow_run`, `api_export_run_to_neohive`.
 
 ## Global Constraints
