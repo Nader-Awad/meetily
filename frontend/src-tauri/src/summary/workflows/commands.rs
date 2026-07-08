@@ -2,7 +2,9 @@ use crate::database::repositories::meeting::MeetingsRepository;
 use crate::database::repositories::setting::SettingsRepository;
 use crate::neohive::NeoHiveClient;
 use crate::state::AppState;
-use crate::summary::workflows::models::{NeoHiveExportConfig, Workflow, WorkflowInput, WorkflowRun};
+use crate::summary::workflows::models::{
+    NeoHiveExportConfig, Workflow, WorkflowInput, WorkflowRun, WorkflowRunStatus,
+};
 use crate::summary::workflows::repository::WorkflowsRepository;
 use crate::summary::workflows::runner;
 use crate::summary::workflows::sections::{memory_type_for, ParsedSection};
@@ -170,19 +172,27 @@ pub struct ExportResult {
     pub failed: usize,
 }
 
+/// neohive_status label given attempted export counts (pushed + failed >= 1).
+pub(crate) fn neohive_status_label(pushed: usize, failed: usize) -> &'static str {
+    if failed == 0 { "pushed" } else if pushed == 0 { "failed" } else { "partial" }
+}
+
 /// Exports a completed run's sections to NeoHive. Shared by the manual command
 /// and the auto-export hook. Sends over the Cloudflare Access service token.
 pub(crate) async fn export_run(pool: &SqlitePool, run_id: &str) -> Result<ExportResult, String> {
     let run = WorkflowsRepository::get_run(pool, run_id)
         .await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Run '{}' not found", run_id))?;
-    if run.status != "completed" {
+    if run.status != WorkflowRunStatus::COMPLETED {
         return Err("Only completed runs can be exported".to_string());
     }
 
     let sections: Vec<ParsedSection> = run.result_sections.as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
+    // Note: this never trips for a real workflow — `parse_sections` always emits
+    // one entry per template section (empty content for missing ones). The real
+    // "anything to export" guard is the post-filter `items.is_empty()` check below.
     if sections.is_empty() {
         return Err("This run has no sections to export".to_string());
     }
@@ -210,6 +220,10 @@ pub(crate) async fn export_run(pool: &SqlitePool, run_id: &str) -> Result<Export
         .await.ok().flatten().map(|m| m.title).unwrap_or_else(|| "Meeting".to_string());
 
     let items = build_export_items(&sections, &export_cfg, &meeting_title, &run.workflow_name);
+    if items.is_empty() {
+        return Err("This run produced no non-empty sections to export".to_string());
+    }
+
     let client = NeoHiveClient::new(endpoint, client_id, client_secret);
 
     let mut pushed = 0usize;
@@ -221,8 +235,10 @@ pub(crate) async fn export_run(pool: &SqlitePool, run_id: &str) -> Result<Export
         }
     }
 
-    let status = if failed == 0 { "pushed" } else if pushed == 0 { "failed" } else { "partial" };
-    let _ = WorkflowsRepository::set_run_neohive_status(pool, run_id, status).await;
+    let status = neohive_status_label(pushed, failed);
+    if let Err(e) = WorkflowsRepository::set_run_neohive_status(pool, run_id, status).await {
+        log_error!("Failed to update neohive_status for run {}: {}", run_id, e);
+    }
 
     Ok(ExportResult { pushed, failed })
 }
@@ -242,6 +258,13 @@ mod tests {
     use crate::summary::workflows::repository::WorkflowsRepository;
     use sqlx::sqlite::SqlitePoolOptions;
     use sqlx::SqlitePool;
+
+    #[test]
+    fn neohive_status_label_maps_counts() {
+        assert_eq!(super::neohive_status_label(3, 0), "pushed");
+        assert_eq!(super::neohive_status_label(0, 2), "failed");
+        assert_eq!(super::neohive_status_label(2, 1), "partial");
+    }
 
     #[test]
     fn build_export_items_skips_empty_and_maps_types() {
