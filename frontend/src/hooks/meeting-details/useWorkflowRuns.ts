@@ -36,6 +36,10 @@ export function useWorkflowRuns(meetingId: string | undefined) {
     activeRunIdRef.current = null;
   }, []);
 
+  const stopIfCurrent = useCallback((rid: string) => {
+    if (activeRunIdRef.current === rid) stopPolling();
+  }, [stopPolling]);
+
   useEffect(() => {
     refresh();
     return () => {
@@ -49,10 +53,7 @@ export function useWorkflowRuns(meetingId: string | undefined) {
     activeRunIdRef.current = runId;
     let count = 0;
     pollRef.current = setInterval(async () => {
-      if (activeRunIdRef.current !== runId) {
-        if (pollRef.current) clearInterval(pollRef.current);
-        return;
-      }
+      if (activeRunIdRef.current !== runId) return;
       count += 1;
       if (count >= MAX_POLLS) {
         stopPolling();
@@ -64,16 +65,16 @@ export function useWorkflowRuns(meetingId: string | undefined) {
         const run = await invokeTauri<WorkflowRun | null>('api_get_workflow_run', { runId });
         await refresh();
         if (run && TERMINAL.includes(run.status)) {
-          stopPolling();
+          stopIfCurrent(runId);
           if (run.status === 'completed') toast.success('Workflow run completed');
           else if (run.status === 'error') toast.error(`Workflow run failed: ${run.error ?? 'unknown error'}`);
         }
       } catch (err) {
         console.error('Polling workflow run failed:', err);
-        stopPolling();
+        stopIfCurrent(runId);
       }
     }, POLL_MS);
-  }, [refresh, stopPolling]);
+  }, [refresh, stopPolling, stopIfCurrent]);
 
   const runWorkflow = useCallback(async (workflowId: string, text: string, summaryLanguage?: string | null) => {
     if (!meetingId) return;
