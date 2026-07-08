@@ -27,7 +27,8 @@ pub struct SettingsRepository;
 #[derive(Debug, Clone, Default)]
 pub struct NeoHiveSettings {
     pub endpoint: Option<String>,
-    pub api_key: Option<String>,
+    pub access_client_id: Option<String>,
+    pub access_client_secret: Option<String>,
     pub enabled: bool,
 }
 
@@ -355,7 +356,8 @@ impl SettingsRepository {
 
     // ===== NEOHIVE CONNECTION SETTINGS =====
 
-    /// Gets the NeoHive connection settings (endpoint, API key, enabled flag)
+    /// Gets the NeoHive connection settings (endpoint, Cloudflare Access service-token
+    /// client ID/secret, enabled flag)
     ///
     /// # Returns
     /// * `Ok(NeoHiveSettings)` - Stored config, or defaults if no row exists yet
@@ -363,15 +365,16 @@ impl SettingsRepository {
     pub async fn get_neohive_config(
         pool: &SqlitePool,
     ) -> std::result::Result<NeoHiveSettings, sqlx::Error> {
-        let row: Option<(Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
-            "SELECT neohiveEndpoint, neohiveApiKey, neohiveEnabled FROM settings WHERE id = '1' LIMIT 1",
+        let row: Option<(Option<String>, Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
+            "SELECT neohiveEndpoint, neohiveAccessClientId, neohiveAccessClientSecret, neohiveEnabled FROM settings WHERE id = '1' LIMIT 1",
         )
         .fetch_optional(pool)
         .await?;
         Ok(match row {
-            Some((endpoint, api_key, enabled)) => NeoHiveSettings {
+            Some((endpoint, access_client_id, access_client_secret, enabled)) => NeoHiveSettings {
                 endpoint,
-                api_key,
+                access_client_id,
+                access_client_secret,
                 enabled: enabled.unwrap_or(0) != 0,
             },
             None => NeoHiveSettings::default(),
@@ -386,21 +389,24 @@ impl SettingsRepository {
     pub async fn save_neohive_config(
         pool: &SqlitePool,
         endpoint: Option<&str>,
-        api_key: Option<&str>,
+        access_client_id: Option<&str>,
+        access_client_secret: Option<&str>,
         enabled: bool,
     ) -> std::result::Result<(), sqlx::Error> {
         sqlx::query(
             r#"
-            INSERT INTO settings (id, provider, model, whisperModel, neohiveEndpoint, neohiveApiKey, neohiveEnabled)
-            VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', ?, ?, ?)
+            INSERT INTO settings (id, provider, model, whisperModel, neohiveEndpoint, neohiveAccessClientId, neohiveAccessClientSecret, neohiveEnabled)
+            VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 neohiveEndpoint = excluded.neohiveEndpoint,
-                neohiveApiKey = excluded.neohiveApiKey,
+                neohiveAccessClientId = excluded.neohiveAccessClientId,
+                neohiveAccessClientSecret = excluded.neohiveAccessClientSecret,
                 neohiveEnabled = excluded.neohiveEnabled
             "#,
         )
         .bind(endpoint)
-        .bind(api_key)
+        .bind(access_client_id)
+        .bind(access_client_secret)
         .bind(if enabled { 1_i64 } else { 0_i64 })
         .execute(pool)
         .await?;
@@ -425,11 +431,16 @@ mod neohive_settings_tests {
     async fn save_then_get_neohive_config() {
         let pool = test_pool().await;
         SettingsRepository::save_neohive_config(
-            &pool, Some("https://neohive.logilica.com/projects/x/mcp"), Some("tok"), true,
+            &pool,
+            Some("https://neohive.logilica.com/projects/x/mcp"),
+            Some("client-id-abc"),
+            Some("client-secret-xyz"),
+            true,
         ).await.unwrap();
         let cfg = SettingsRepository::get_neohive_config(&pool).await.unwrap();
         assert_eq!(cfg.endpoint.as_deref(), Some("https://neohive.logilica.com/projects/x/mcp"));
-        assert_eq!(cfg.api_key.as_deref(), Some("tok"));
+        assert_eq!(cfg.access_client_id.as_deref(), Some("client-id-abc"));
+        assert_eq!(cfg.access_client_secret.as_deref(), Some("client-secret-xyz"));
         assert!(cfg.enabled);
     }
 
@@ -438,6 +449,8 @@ mod neohive_settings_tests {
         let pool = test_pool().await;
         let cfg = SettingsRepository::get_neohive_config(&pool).await.unwrap();
         assert!(cfg.endpoint.is_none());
+        assert!(cfg.access_client_id.is_none());
+        assert!(cfg.access_client_secret.is_none());
         assert!(!cfg.enabled);
     }
 }
