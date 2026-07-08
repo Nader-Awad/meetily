@@ -681,6 +681,8 @@ pub fn run() {
             summary::workflows::commands::api_list_workflow_runs,
             summary::workflows::commands::api_cancel_workflow_run,
             summary::workflows::commands::api_export_run_to_neohive,
+            summary::workflows::commands::api_get_neohive_config,
+            summary::workflows::commands::api_save_neohive_config,
             // Built-in AI commands
             summary::summary_engine::commands::builtin_ai_list_models,
             summary::summary_engine::commands::builtin_ai_get_model_info,

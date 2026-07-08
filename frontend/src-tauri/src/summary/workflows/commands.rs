@@ -252,6 +252,51 @@ pub async fn api_export_run_to_neohive(
     export_run(state.db_manager.pool(), &run_id).await
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NeoHiveConfigResponse {
+    pub endpoint: Option<String>,
+    pub access_client_id: Option<String>,
+    pub access_client_secret: Option<String>,
+    pub enabled: bool,
+}
+
+#[tauri::command]
+pub async fn api_get_neohive_config(
+    state: tauri::State<'_, AppState>,
+) -> Result<NeoHiveConfigResponse, String> {
+    log_info!("api_get_neohive_config called");
+    let cfg = SettingsRepository::get_neohive_config(state.db_manager.pool())
+        .await
+        .map_err(|e| { log_error!("api_get_neohive_config failed: {}", e); e.to_string() })?;
+    Ok(NeoHiveConfigResponse {
+        endpoint: cfg.endpoint,
+        access_client_id: cfg.access_client_id,
+        access_client_secret: cfg.access_client_secret,
+        enabled: cfg.enabled,
+    })
+}
+
+#[tauri::command]
+pub async fn api_save_neohive_config(
+    state: tauri::State<'_, AppState>,
+    endpoint: Option<String>,
+    access_client_id: Option<String>,
+    access_client_secret: Option<String>,
+    enabled: bool,
+) -> Result<(), String> {
+    log_info!("api_save_neohive_config called (enabled={})", enabled);
+    SettingsRepository::save_neohive_config(
+        state.db_manager.pool(),
+        endpoint.as_deref(),
+        access_client_id.as_deref(),
+        access_client_secret.as_deref(),
+        enabled,
+    )
+    .await
+    .map_err(|e| { log_error!("api_save_neohive_config failed: {}", e); e.to_string() })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::summary::workflows::models::{NeoHiveExportConfig, WorkflowInput};
