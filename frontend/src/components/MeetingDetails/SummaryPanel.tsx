@@ -364,6 +364,13 @@ export function SummaryPanel({
             hasModel={modelConfig.provider !== null && modelConfig.model !== null}
             isGenerating={isSummaryLoading}
           />
+          {transcripts.length > 0 && (
+            <WorkflowRunSection
+              meetingId={meeting.id}
+              transcriptText={transcripts.map((t) => t.text).join('\n')}
+              summaryLanguage={summaryLang}
+            />
+          )}
         </div>
       ) : transcripts?.length > 0 && (
         <div className="flex-1 overflow-y-auto min-h-0">

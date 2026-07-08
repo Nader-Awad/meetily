@@ -14,14 +14,16 @@ export function useWorkflowRuns(meetingId: string | undefined) {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const activeRunIdRef = useRef<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    if (!meetingId) return;
+  const refresh = useCallback(async (): Promise<WorkflowRun[] | undefined> => {
+    if (!meetingId) return undefined;
     setIsLoading(true);
     try {
       const list = await invokeTauri<WorkflowRun[]>('api_list_workflow_runs', { meetingId });
       setRuns(list);
+      return list;
     } catch (err) {
       console.error('Failed to list workflow runs:', err);
+      return undefined;
     } finally {
       setIsLoading(false);
     }
@@ -39,13 +41,6 @@ export function useWorkflowRuns(meetingId: string | undefined) {
   const stopIfCurrent = useCallback((rid: string) => {
     if (activeRunIdRef.current === rid) stopPolling();
   }, [stopPolling]);
-
-  useEffect(() => {
-    refresh();
-    return () => {
-      stopPolling();
-    };
-  }, [refresh, stopPolling]);
 
   const startPolling = useCallback((runId: string) => {
     if (pollRef.current) clearInterval(pollRef.current);
@@ -75,6 +70,22 @@ export function useWorkflowRuns(meetingId: string | undefined) {
       }
     }, POLL_MS);
   }, [refresh, stopPolling, stopIfCurrent]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const list = await refresh();
+      if (cancelled || !list) return;
+      const inProgress = list.find((r) => r.status === 'queued' || r.status === 'running');
+      if (inProgress && !activeRunIdRef.current && !pollRef.current) {
+        startPolling(inProgress.id);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      stopPolling();
+    };
+  }, [refresh, stopPolling, startPolling]);
 
   const runWorkflow = useCallback(async (workflowId: string, text: string, summaryLanguage?: string | null) => {
     if (!meetingId) return;
