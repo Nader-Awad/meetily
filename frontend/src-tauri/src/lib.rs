@@ -41,6 +41,7 @@ pub mod audio;
 pub mod config;
 pub mod console_utils;
 pub mod database;
+pub mod neohive;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
