@@ -21,18 +21,20 @@ fn normalize_heading(line: &str) -> String {
     s.to_lowercase()
 }
 
-/// Returns true if `line` is a heading for `title` (bold, #, or plain), tolerant
-/// of case and a trailing colon.
+/// Returns true if `line` is a heading for `title` (markdown `#` or bold
+/// `**Title**`), tolerant of case and a trailing colon. A bare, unstyled line
+/// that merely matches the title text is intentionally NOT treated as a
+/// heading: the summary template always renders section headers with
+/// explicit markup, so an unmarked line is most likely prose. Matching it
+/// anyway risks silently stealing content from the real heading later in the
+/// document.
 fn is_heading_for(line: &str, title_lower: &str) -> bool {
     let t = line.trim();
     if t.is_empty() {
         return false;
     }
-    // Only treat short-ish lines as potential headings to avoid matching prose
-    // that merely mentions the title.
     let looks_like_heading = t.starts_with('#')
-        || (t.starts_with("**") && t.trim_end_matches(':').trim_end().ends_with("**"))
-        || t.trim_end_matches(':').eq_ignore_ascii_case(title_lower); // plain title-only line
+        || (t.starts_with("**") && t.trim_end_matches(':').trim_end().ends_with("**"));
     looks_like_heading && normalize_heading(t) == title_lower
 }
 
@@ -136,6 +138,15 @@ mod tests {
         let out = parse_sections(md, &titles());
         assert_eq!(out[0].content.trim(), "lower");
         assert_eq!(out[1].content.trim(), "upper");
+    }
+
+    #[test]
+    fn bare_prose_line_matching_a_title_is_not_treated_as_heading() {
+        let md = "**Summary**\nWe should write a summary later.\nKey Decisions\nWe made none yet.\n**Key Decisions**\n- Ship Friday\n**Action Items**\n- Alice: docs\n";
+        let out = parse_sections(md, &titles());
+        assert_eq!(out[1].title, "Key Decisions");
+        assert!(out[1].content.contains("Ship Friday"));
+        assert!(!out[1].content.contains("We made none yet."));
     }
 
     #[test]
