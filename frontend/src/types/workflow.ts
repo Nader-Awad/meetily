@@ -70,12 +70,25 @@ export interface WorkflowRun {
   updatedAt: string;
 }
 
-/** Cloudflare Access service-token connection settings (from api_get_neohive_config). */
+export type NeoHiveAuthType = 'cloudflare_access' | 'bearer' | 'basic' | 'custom_header' | 'none';
+
+/** Method-specific auth fields (camelCase; mirrors the Rust JSON config). */
+export interface NeoHiveAuthConfig {
+  clientId?: string;
+  clientSecret?: string;
+  token?: string;
+  username?: string;
+  password?: string;
+  headerName?: string;
+  headerValue?: string;
+}
+
+/** NeoHive connection settings (from api_get_neohive_config). */
 export interface NeoHiveSettings {
   endpoint: string | null;
-  accessClientId: string | null;
-  accessClientSecret: string | null;
   enabled: boolean;
+  authType: NeoHiveAuthType;
+  authConfig: NeoHiveAuthConfig;
 }
 
 export interface ExportResult {
