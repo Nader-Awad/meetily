@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.1 — 2026-07-09
+
+Fix: the **Speaker identification** toggle was mounted in an unused settings component and
+never appeared on the actual Settings screen. It now shows under **Settings → Transcription**.
+(Also validates the fork's in-app auto-update path from v0.5.0.)
+
 ## v0.5.0 — 2026-07-09
 
 First release of the personal fork's own update channel — auto-update now points at
