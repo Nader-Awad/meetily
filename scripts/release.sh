@@ -80,6 +80,11 @@ fi
 # Annotated + messaged so it works under tag.gpgsign/forceSignAnnotated (a plain
 # lightweight tag errors "no tag message?" when signing is forced).
 git -C "$ROOT" tag -a "$TAG" -m "Release $TAG"
+# Push the tag (and the commits it references) so the release's commit exists on
+# GitHub — origin/main is intentionally behind (personal fork), so gh release create
+# needs the tag ref present remotely first.
+echo "▶ Pushing tag $TAG to $REPO…"
+git -C "$ROOT" push origin "$TAG"
 echo "▶ Publishing GitHub Release $TAG on $REPO…"
 gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file "$ROOT/CHANGELOG.md" \
   "$DMG" "$APP_TARGZ" "$APP_SIG" "$LATEST_JSON"
