@@ -339,6 +339,9 @@ async fn run_retranscription<R: Runtime>(
     let mut all_transcripts: Vec<(String, f64, f64, Option<String>)> = Vec::new(); // (text, start_ms, end_ms, speaker)
     let mut total_confidence = 0.0f32;
 
+    // Best-effort speaker diarization: None unless the feature is enabled + model present.
+    let mut diarization = crate::diarization::commands::init_session(&app).await;
+
     for (i, segment) in processable_segments.iter().enumerate() {
         // Check for cancellation before each segment
         if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
@@ -392,7 +395,10 @@ async fn run_retranscription<R: Runtime>(
                 i + 1, processable_count, segment_duration_sec, conf,
                 if trimmed.len() > 80 { let mut end = 80; while !trimmed.is_char_boundary(end) { end -= 1; } &trimmed[..end] } else { trimmed }
             );
-            all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms, None));
+            let speaker = diarization
+                .as_mut()
+                .and_then(|s| s.label_segment(&segment.samples));
+            all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms, speaker));
             total_confidence += conf;
         } else {
             debug!("Segment {}/{}: {:.1}s — empty transcription", i + 1, processable_count, segment_duration_sec);
@@ -441,8 +447,8 @@ async fn run_retranscription<R: Runtime>(
 
     for segment in &segments {
         sqlx::query(
-            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&segment.id)
         .bind(&meeting_id)
@@ -451,6 +457,7 @@ async fn run_retranscription<R: Runtime>(
         .bind(segment.audio_start_time)
         .bind(segment.audio_end_time)
         .bind(segment.duration)
+        .bind(&segment.speaker)
         .execute(&mut *tx)
         .await
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
@@ -470,6 +477,10 @@ async fn run_retranscription<R: Runtime>(
 
     if let Err(e) = write_transcripts_json(&folder_path, &segments) {
         warn!("Failed to write transcripts.json: {}", e);
+    }
+
+    if let Some(session) = diarization.as_ref() {
+        crate::diarization::commands::persist_speaker_centroids(session, Some(folder_path.clone())).await;
     }
 
     // Find audio filename for metadata
