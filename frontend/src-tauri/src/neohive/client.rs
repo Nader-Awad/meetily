@@ -1,9 +1,52 @@
 use serde_json::{json, Value};
 
+/// Authentication for the NeoHive MCP endpoint. Built from a stored
+/// (type string, fields JSON) pair via `from_parts` and applied to each request.
+#[derive(Debug, Clone)]
+pub enum NeoHiveAuth {
+    CloudflareAccess { client_id: String, client_secret: String },
+    Bearer { token: String },
+    Basic { username: String, password: String },
+    CustomHeader { header_name: String, header_value: String },
+    None,
+}
+
+impl NeoHiveAuth {
+    /// Map the snake_case type + camelCase fields JSON into an auth method.
+    /// Blank/missing required fields for a known type, or an unknown type, error.
+    pub fn from_parts(auth_type: Option<&str>, config: &serde_json::Value) -> Result<Self, String> {
+        let req = |k: &str| -> Result<String, String> {
+            config.get(k).and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .ok_or_else(|| format!("NeoHive auth: missing/empty field '{}'", k))
+        };
+        match auth_type {
+            Some("cloudflare_access") => Ok(NeoHiveAuth::CloudflareAccess { client_id: req("clientId")?, client_secret: req("clientSecret")? }),
+            Some("bearer") => Ok(NeoHiveAuth::Bearer { token: req("token")? }),
+            Some("basic") => Ok(NeoHiveAuth::Basic { username: req("username")?, password: req("password")? }),
+            Some("custom_header") => Ok(NeoHiveAuth::CustomHeader { header_name: req("headerName")?, header_value: req("headerValue")? }),
+            Some("none") | None => Ok(NeoHiveAuth::None),
+            Some(other) => Err(format!("NeoHive auth: unknown type '{}'", other)),
+        }
+    }
+
+    /// Attach this method's auth to a request builder. Invariant headers are set by the caller.
+    fn apply(&self, b: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self {
+            NeoHiveAuth::CloudflareAccess { client_id, client_secret } => b
+                .header("CF-Access-Client-Id", client_id)
+                .header("CF-Access-Client-Secret", client_secret),
+            NeoHiveAuth::Bearer { token } => b.bearer_auth(token),
+            NeoHiveAuth::Basic { username, password } => b.basic_auth(username, Some(password)),
+            NeoHiveAuth::CustomHeader { header_name, header_value } => b.header(header_name.as_str(), header_value.as_str()),
+            NeoHiveAuth::None => b,
+        }
+    }
+}
+
 pub struct NeoHiveClient {
     endpoint: String,
-    access_client_id: String,
-    access_client_secret: String,
+    auth: NeoHiveAuth,
     http: reqwest::Client,
     session_id: tokio::sync::Mutex<Option<String>>,
 }
@@ -50,11 +93,10 @@ pub(crate) fn interpret_tool_response(parsed: &serde_json::Value) -> Result<(), 
 }
 
 impl NeoHiveClient {
-    pub fn new(endpoint: String, access_client_id: String, access_client_secret: String) -> Self {
+    pub fn new(endpoint: String, auth: NeoHiveAuth) -> Self {
         Self {
             endpoint,
-            access_client_id,
-            access_client_secret,
+            auth,
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -63,15 +105,14 @@ impl NeoHiveClient {
         }
     }
 
-    /// Base request with Cloudflare Access service-token headers + MCP Accept.
+    /// Base request with the configured auth method's headers + MCP Accept.
     fn base_request(&self) -> reqwest::RequestBuilder {
-        self.http
+        let b = self.http
             .post(&self.endpoint)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream")
-            .header("CF-Access-Client-Id", &self.access_client_id)
-            .header("CF-Access-Client-Secret", &self.access_client_secret)
-            .header("x-mcp-client", "meetily")
+            .header("x-mcp-client", "meetily");
+        self.auth.apply(b)
     }
 
     /// Extract the JSON-RPC object from a plain-JSON or SSE body.
@@ -197,5 +238,58 @@ mod tests {
     fn interpret_tool_response_err_on_protocol_error() {
         let v = serde_json::json!({"error":{"code":-32602,"message":"invalid"}});
         assert!(interpret_tool_response(&v).is_err());
+    }
+
+    fn header_val(req: &reqwest::Request, name: &str) -> Option<String> {
+        req.headers().get(name).and_then(|v| v.to_str().ok()).map(|s| s.to_string())
+    }
+
+    #[test]
+    fn apply_cloudflare_sets_cf_headers_and_no_auth() {
+        let req = NeoHiveAuth::CloudflareAccess { client_id: "id1".into(), client_secret: "sec1".into() }
+            .apply(reqwest::Client::new().post("http://x")).build().unwrap();
+        assert_eq!(header_val(&req, "cf-access-client-id").as_deref(), Some("id1"));
+        assert_eq!(header_val(&req, "cf-access-client-secret").as_deref(), Some("sec1"));
+        assert!(header_val(&req, "authorization").is_none());
+    }
+
+    #[test]
+    fn apply_bearer_sets_authorization() {
+        let req = NeoHiveAuth::Bearer { token: "tok".into() }
+            .apply(reqwest::Client::new().post("http://x")).build().unwrap();
+        assert_eq!(header_val(&req, "authorization").as_deref(), Some("Bearer tok"));
+    }
+
+    #[test]
+    fn apply_basic_sets_base64_authorization() {
+        let req = NeoHiveAuth::Basic { username: "user".into(), password: "pass".into() }
+            .apply(reqwest::Client::new().post("http://x")).build().unwrap();
+        // base64("user:pass") == "dXNlcjpwYXNz"
+        assert_eq!(header_val(&req, "authorization").as_deref(), Some("Basic dXNlcjpwYXNz"));
+    }
+
+    #[test]
+    fn apply_custom_header_sets_it() {
+        let req = NeoHiveAuth::CustomHeader { header_name: "X-Api-Key".into(), header_value: "k".into() }
+            .apply(reqwest::Client::new().post("http://x")).build().unwrap();
+        assert_eq!(header_val(&req, "x-api-key").as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn apply_none_sets_no_auth_headers() {
+        let req = NeoHiveAuth::None.apply(reqwest::Client::new().post("http://x")).build().unwrap();
+        assert!(header_val(&req, "authorization").is_none());
+        assert!(header_val(&req, "cf-access-client-id").is_none());
+    }
+
+    #[test]
+    fn from_parts_maps_types_and_validates() {
+        use serde_json::json;
+        assert!(matches!(NeoHiveAuth::from_parts(Some("cloudflare_access"), &json!({"clientId":"a","clientSecret":"b"})).unwrap(), NeoHiveAuth::CloudflareAccess{..}));
+        assert!(matches!(NeoHiveAuth::from_parts(Some("bearer"), &json!({"token":"t"})).unwrap(), NeoHiveAuth::Bearer{..}));
+        assert!(matches!(NeoHiveAuth::from_parts(Some("none"), &json!({})).unwrap(), NeoHiveAuth::None));
+        assert!(matches!(NeoHiveAuth::from_parts(None, &json!({})).unwrap(), NeoHiveAuth::None));
+        assert!(NeoHiveAuth::from_parts(Some("bearer"), &json!({"token":""})).is_err());     // blank required field
+        assert!(NeoHiveAuth::from_parts(Some("mystery"), &json!({})).is_err());               // unknown type
     }
 }

@@ -224,7 +224,7 @@ pub(crate) async fn export_run(pool: &SqlitePool, run_id: &str) -> Result<Export
         return Err("This run produced no non-empty sections to export".to_string());
     }
 
-    let client = NeoHiveClient::new(endpoint, client_id, client_secret);
+    let client = NeoHiveClient::new(endpoint, crate::neohive::NeoHiveAuth::CloudflareAccess { client_id, client_secret });
 
     let mut pushed = 0usize;
     let mut failed = 0usize;
