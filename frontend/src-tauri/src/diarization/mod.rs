@@ -7,3 +7,4 @@
 // overlap/timeline machinery. See docs in each module.
 
 pub mod fbank;
+pub mod embedding;
