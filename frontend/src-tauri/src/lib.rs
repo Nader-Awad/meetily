@@ -41,6 +41,7 @@ pub mod audio;
 pub mod config;
 pub mod console_utils;
 pub mod database;
+pub mod diarization;
 pub mod neohive;
 pub mod notifications;
 pub mod ollama;
@@ -680,6 +681,13 @@ pub fn run() {
             summary::workflows::commands::api_get_workflow_run,
             summary::workflows::commands::api_list_workflow_runs,
             summary::workflows::commands::api_cancel_workflow_run,
+            diarization::commands::diarization_get_status,
+            diarization::commands::diarization_set_enabled,
+            diarization::commands::diarization_download_model,
+            diarization::commands::diarization_rename_speaker,
+            diarization::commands::diarization_list_profiles,
+            diarization::commands::diarization_rename_profile,
+            diarization::commands::diarization_delete_profile,
             summary::workflows::commands::api_export_run_to_neohive,
             summary::workflows::commands::api_get_neohive_config,
             summary::workflows::commands::api_save_neohive_config,

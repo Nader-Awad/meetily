@@ -20,6 +20,18 @@ interface SpeechDetectedEvent {
   message: string;
 }
 
+// Deterministic chip color from the label so the same speaker keeps one color.
+function speakerChipColor(label: string): string {
+  const palette = [
+    'bg-blue-100 text-blue-700', 'bg-green-100 text-green-700',
+    'bg-purple-100 text-purple-700', 'bg-amber-100 text-amber-700',
+    'bg-pink-100 text-pink-700', 'bg-cyan-100 text-cyan-700',
+  ];
+  let hash = 0;
+  for (let i = 0; i < label.length; i++) hash = (hash * 31 + label.charCodeAt(i)) | 0;
+  return palette[Math.abs(hash) % palette.length];
+}
+
 // Helper function to format seconds as recording-relative time [MM:SS]
 function formatRecordingTime(seconds: number | undefined): string {
   if (seconds === undefined) return '[--:--]';
@@ -305,6 +317,11 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({ transcripts, isR
                 </TooltipContent>
               </Tooltip>
               <div className="flex-1">
+                {transcript.speaker && (
+                  <span className={`inline-block mb-1 px-1.5 py-0.5 rounded text-xs font-medium ${speakerChipColor(transcript.speaker)}`}>
+                    {transcript.speaker}
+                  </span>
+                )}
                 {isStreaming ? (
                   // Streaming transcript - show in bubble (full width)
                   <div className="bg-gray-100 border border-gray-200 rounded-lg px-3 py-2">

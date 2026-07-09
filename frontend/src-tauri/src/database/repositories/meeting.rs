@@ -85,14 +85,7 @@ impl MeetingsRepository {
             // Convert Transcript to MeetingTranscript
             let meeting_transcripts = transcripts
                 .into_iter()
-                .map(|t| MeetingTranscript {
-                    id: t.id,
-                    text: t.transcript,
-                    timestamp: t.timestamp,
-                    audio_start_time: t.audio_start_time,
-                    audio_end_time: t.audio_end_time,
-                    duration: t.duration,
-                })
+                .map(MeetingTranscript::from)
                 .collect::<Vec<_>>();
 
             Ok(Some(MeetingDetails {

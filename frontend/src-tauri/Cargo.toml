@@ -173,6 +173,11 @@ cidre = { git = "https://github.com/yury/cidre", rev = "a9587fa", features = ["a
 dasp = "0.11.0"
 futures-channel = "0.3.31"
 
+# Speaker-embedding inference offloads to the Apple Neural Engine / GPU via
+# ort's CoreML execution provider on macOS, with CPU fallback (see
+# src/diarization/embedding.rs). macOS-only so non-Apple builds stay CPU.
+ort = { version = "2.0.0-rc.10", features = ["coreml"] }
+
 # PERFORMANCE: Enable Metal GPU + CoreML acceleration automatically on macOS
 # CoreML provides additional acceleration for Apple Silicon chips
 whisper-rs = { version = "0.13.2", features = ["raw-api", "metal", "coreml"] }

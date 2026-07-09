@@ -367,7 +367,7 @@ export function SummaryPanel({
           {transcripts.length > 0 && (
             <WorkflowRunSection
               meetingId={meeting.id}
-              transcriptText={transcripts.map((t) => t.text).join('\n')}
+              transcriptText={transcripts.map((t) => (t.speaker ? `[${t.speaker}] ${t.text}` : t.text)).join('\n')}
               summaryLanguage={summaryLang}
             />
           )}
@@ -441,7 +441,7 @@ export function SummaryPanel({
           </div>
           <WorkflowRunSection
             meetingId={meeting.id}
-            transcriptText={transcripts.map((t) => t.text).join('\n')}
+            transcriptText={transcripts.map((t) => (t.speaker ? `[${t.speaker}] ${t.text}` : t.text)).join('\n')}
             summaryLanguage={summaryLang}
           />
           {summaryStatus !== 'idle' && (
