@@ -202,8 +202,10 @@ pub(crate) async fn export_run(pool: &SqlitePool, run_id: &str) -> Result<Export
         return Err("NeoHive export is disabled in Settings".to_string());
     }
     let endpoint = neo.endpoint.ok_or("NeoHive endpoint is not configured")?;
-    let client_id = neo.access_client_id.ok_or("NeoHive Access Client Id is not configured")?;
-    let client_secret = neo.access_client_secret.ok_or("NeoHive Access Client Secret is not configured")?;
+    let auth_config_val: serde_json::Value = neo.auth_config.as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let auth = crate::neohive::NeoHiveAuth::from_parts(neo.auth_type.as_deref(), &auth_config_val)?;
 
     // Per-workflow export config (type overrides, importance).
     let export_cfg = match &run.workflow_id {
@@ -224,7 +226,7 @@ pub(crate) async fn export_run(pool: &SqlitePool, run_id: &str) -> Result<Export
         return Err("This run produced no non-empty sections to export".to_string());
     }
 
-    let client = NeoHiveClient::new(endpoint, client_id, client_secret);
+    let client = NeoHiveClient::new(endpoint, auth);
 
     let mut pushed = 0usize;
     let mut failed = 0usize;
@@ -256,9 +258,9 @@ pub async fn api_export_run_to_neohive(
 #[serde(rename_all = "camelCase")]
 pub struct NeoHiveConfigResponse {
     pub endpoint: Option<String>,
-    pub access_client_id: Option<String>,
-    pub access_client_secret: Option<String>,
     pub enabled: bool,
+    pub auth_type: Option<String>,
+    pub auth_config: Option<serde_json::Value>,
 }
 
 #[tauri::command]
@@ -269,11 +271,12 @@ pub async fn api_get_neohive_config(
     let cfg = SettingsRepository::get_neohive_config(state.db_manager.pool())
         .await
         .map_err(|e| { log_error!("api_get_neohive_config failed: {}", e); e.to_string() })?;
+    let auth_config = cfg.auth_config.as_deref().and_then(|s| serde_json::from_str(s).ok());
     Ok(NeoHiveConfigResponse {
         endpoint: cfg.endpoint,
-        access_client_id: cfg.access_client_id,
-        access_client_secret: cfg.access_client_secret,
         enabled: cfg.enabled,
+        auth_type: cfg.auth_type,
+        auth_config,
     })
 }
 
@@ -281,17 +284,18 @@ pub async fn api_get_neohive_config(
 pub async fn api_save_neohive_config(
     state: tauri::State<'_, AppState>,
     endpoint: Option<String>,
-    access_client_id: Option<String>,
-    access_client_secret: Option<String>,
     enabled: bool,
+    auth_type: Option<String>,
+    auth_config: Option<serde_json::Value>,
 ) -> Result<(), String> {
-    log_info!("api_save_neohive_config called (enabled={})", enabled);
+    log_info!("api_save_neohive_config called (enabled={}, authType={:?})", enabled, auth_type);
+    let auth_config_str = auth_config.map(|v| v.to_string());
     SettingsRepository::save_neohive_config(
         state.db_manager.pool(),
         endpoint.as_deref(),
-        access_client_id.as_deref(),
-        access_client_secret.as_deref(),
         enabled,
+        auth_type.as_deref(),
+        auth_config_str.as_deref(),
     )
     .await
     .map_err(|e| { log_error!("api_save_neohive_config failed: {}", e); e.to_string() })

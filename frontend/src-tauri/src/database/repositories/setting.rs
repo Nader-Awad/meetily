@@ -27,9 +27,9 @@ pub struct SettingsRepository;
 #[derive(Debug, Clone, Default)]
 pub struct NeoHiveSettings {
     pub endpoint: Option<String>,
-    pub access_client_id: Option<String>,
-    pub access_client_secret: Option<String>,
     pub enabled: bool,
+    pub auth_type: Option<String>,
+    pub auth_config: Option<String>, // JSON string of method fields
 }
 
 // Transcript providers: localWhisper, deepgram, elevenLabs, groq, openai
@@ -356,8 +356,8 @@ impl SettingsRepository {
 
     // ===== NEOHIVE CONNECTION SETTINGS =====
 
-    /// Gets the NeoHive connection settings (endpoint, Cloudflare Access service-token
-    /// client ID/secret, enabled flag)
+    /// Gets the NeoHive connection settings (endpoint, enabled flag, auth method
+    /// type + method-specific config JSON)
     ///
     /// # Returns
     /// * `Ok(NeoHiveSettings)` - Stored config, or defaults if no row exists yet
@@ -365,17 +365,17 @@ impl SettingsRepository {
     pub async fn get_neohive_config(
         pool: &SqlitePool,
     ) -> std::result::Result<NeoHiveSettings, sqlx::Error> {
-        let row: Option<(Option<String>, Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
-            "SELECT neohiveEndpoint, neohiveAccessClientId, neohiveAccessClientSecret, neohiveEnabled FROM settings WHERE id = '1' LIMIT 1",
+        let row: Option<(Option<String>, Option<i64>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT neohiveEndpoint, neohiveEnabled, neohiveAuthType, neohiveAuthConfig FROM settings WHERE id = '1' LIMIT 1",
         )
         .fetch_optional(pool)
         .await?;
         Ok(match row {
-            Some((endpoint, access_client_id, access_client_secret, enabled)) => NeoHiveSettings {
+            Some((endpoint, enabled, auth_type, auth_config)) => NeoHiveSettings {
                 endpoint,
-                access_client_id,
-                access_client_secret,
                 enabled: enabled.unwrap_or(0) != 0,
+                auth_type,
+                auth_config,
             },
             None => NeoHiveSettings::default(),
         })
@@ -389,25 +389,25 @@ impl SettingsRepository {
     pub async fn save_neohive_config(
         pool: &SqlitePool,
         endpoint: Option<&str>,
-        access_client_id: Option<&str>,
-        access_client_secret: Option<&str>,
         enabled: bool,
+        auth_type: Option<&str>,
+        auth_config: Option<&str>,
     ) -> std::result::Result<(), sqlx::Error> {
         sqlx::query(
             r#"
-            INSERT INTO settings (id, provider, model, whisperModel, neohiveEndpoint, neohiveAccessClientId, neohiveAccessClientSecret, neohiveEnabled)
+            INSERT INTO settings (id, provider, model, whisperModel, neohiveEndpoint, neohiveEnabled, neohiveAuthType, neohiveAuthConfig)
             VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 neohiveEndpoint = excluded.neohiveEndpoint,
-                neohiveAccessClientId = excluded.neohiveAccessClientId,
-                neohiveAccessClientSecret = excluded.neohiveAccessClientSecret,
-                neohiveEnabled = excluded.neohiveEnabled
+                neohiveEnabled = excluded.neohiveEnabled,
+                neohiveAuthType = excluded.neohiveAuthType,
+                neohiveAuthConfig = excluded.neohiveAuthConfig
             "#,
         )
         .bind(endpoint)
-        .bind(access_client_id)
-        .bind(access_client_secret)
         .bind(if enabled { 1_i64 } else { 0_i64 })
+        .bind(auth_type)
+        .bind(auth_config)
         .execute(pool)
         .await?;
         Ok(())
@@ -428,20 +428,20 @@ mod neohive_settings_tests {
     }
 
     #[tokio::test]
-    async fn save_then_get_neohive_config() {
+    async fn save_then_get_neohive_config_bearer() {
         let pool = test_pool().await;
         SettingsRepository::save_neohive_config(
             &pool,
-            Some("https://neohive.logilica.com/projects/x/mcp"),
-            Some("client-id-abc"),
-            Some("client-secret-xyz"),
+            Some("https://neo.example/mcp"),
             true,
+            Some("bearer"),
+            Some(r#"{"token":"tok-123"}"#),
         ).await.unwrap();
         let cfg = SettingsRepository::get_neohive_config(&pool).await.unwrap();
-        assert_eq!(cfg.endpoint.as_deref(), Some("https://neohive.logilica.com/projects/x/mcp"));
-        assert_eq!(cfg.access_client_id.as_deref(), Some("client-id-abc"));
-        assert_eq!(cfg.access_client_secret.as_deref(), Some("client-secret-xyz"));
+        assert_eq!(cfg.endpoint.as_deref(), Some("https://neo.example/mcp"));
         assert!(cfg.enabled);
+        assert_eq!(cfg.auth_type.as_deref(), Some("bearer"));
+        assert_eq!(cfg.auth_config.as_deref(), Some(r#"{"token":"tok-123"}"#));
     }
 
     #[tokio::test]
@@ -449,8 +449,59 @@ mod neohive_settings_tests {
         let pool = test_pool().await;
         let cfg = SettingsRepository::get_neohive_config(&pool).await.unwrap();
         assert!(cfg.endpoint.is_none());
-        assert!(cfg.access_client_id.is_none());
-        assert!(cfg.access_client_secret.is_none());
+        assert!(cfg.auth_type.is_none());
+        assert!(cfg.auth_config.is_none());
         assert!(!cfg.enabled);
+    }
+
+    /// Proves the `20260709000002_add_neohive_auth_method.sql` backfill UPDATE
+    /// correctly migrates a pre-existing Cloudflare Access config (the old
+    /// dedicated columns) into the new generic neohiveAuthType/neohiveAuthConfig
+    /// columns, and that the resulting shape actually builds working Cloudflare
+    /// auth via `NeoHiveAuth::from_parts`.
+    #[tokio::test]
+    async fn backfill_transforms_legacy_cloudflare_config() {
+        let pool = test_pool().await;
+
+        // Simulate a row written before the neohiveAuthType/neohiveAuthConfig
+        // columns existed: only the legacy Cloudflare-specific columns are set.
+        sqlx::query(
+            r#"
+            INSERT INTO settings (id, provider, model, whisperModel, neohiveAccessClientId, neohiveAccessClientSecret)
+            VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', 'cid-legacy', 'csec-legacy')
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Run the exact backfill transform from the migration.
+        sqlx::query(
+            r#"
+            UPDATE settings
+            SET neohiveAuthType = 'cloudflare_access',
+                neohiveAuthConfig = json_object('clientId', neohiveAccessClientId, 'clientSecret', neohiveAccessClientSecret)
+            WHERE neohiveAccessClientId IS NOT NULL OR neohiveAccessClientSecret IS NOT NULL
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let cfg = SettingsRepository::get_neohive_config(&pool).await.unwrap();
+        assert_eq!(cfg.auth_type.as_deref(), Some("cloudflare_access"));
+
+        let auth_config_json = cfg.auth_config.expect("backfill should have set neohiveAuthConfig");
+        let parsed: serde_json::Value = serde_json::from_str(&auth_config_json).unwrap();
+        assert_eq!(parsed.get("clientId").and_then(|v| v.as_str()), Some("cid-legacy"));
+        assert_eq!(parsed.get("clientSecret").and_then(|v| v.as_str()), Some("csec-legacy"));
+
+        // Strengthen: the backfilled shape must actually produce working Cloudflare auth.
+        let auth = crate::neohive::NeoHiveAuth::from_parts(cfg.auth_type.as_deref(), &parsed).unwrap();
+        assert!(matches!(
+            &auth,
+            crate::neohive::NeoHiveAuth::CloudflareAccess { client_id, client_secret }
+                if client_id == "cid-legacy" && client_secret == "csec-legacy"
+        ));
     }
 }
