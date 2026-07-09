@@ -158,7 +158,7 @@ impl NeoHiveClient {
         let text = resp.text().await.map_err(|e| e.to_string())?;
         if !status.is_success() {
             let snippet: String = text.chars().take(300).collect();
-            return Err(format!("NeoHive initialize returned HTTP {} (check the Cloudflare Access service token and endpoint): {}", status, snippet));
+            return Err(format!("NeoHive initialize returned HTTP {} (check the endpoint and the configured auth credentials): {}", status, snippet));
         }
         // Surfaces auth/protocol errors early.
         let parsed = Self::parse_body(&ct, &text)?;

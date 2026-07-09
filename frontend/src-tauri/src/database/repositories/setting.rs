@@ -453,4 +453,55 @@ mod neohive_settings_tests {
         assert!(cfg.auth_config.is_none());
         assert!(!cfg.enabled);
     }
+
+    /// Proves the `20260709000002_add_neohive_auth_method.sql` backfill UPDATE
+    /// correctly migrates a pre-existing Cloudflare Access config (the old
+    /// dedicated columns) into the new generic neohiveAuthType/neohiveAuthConfig
+    /// columns, and that the resulting shape actually builds working Cloudflare
+    /// auth via `NeoHiveAuth::from_parts`.
+    #[tokio::test]
+    async fn backfill_transforms_legacy_cloudflare_config() {
+        let pool = test_pool().await;
+
+        // Simulate a row written before the neohiveAuthType/neohiveAuthConfig
+        // columns existed: only the legacy Cloudflare-specific columns are set.
+        sqlx::query(
+            r#"
+            INSERT INTO settings (id, provider, model, whisperModel, neohiveAccessClientId, neohiveAccessClientSecret)
+            VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', 'cid-legacy', 'csec-legacy')
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Run the exact backfill transform from the migration.
+        sqlx::query(
+            r#"
+            UPDATE settings
+            SET neohiveAuthType = 'cloudflare_access',
+                neohiveAuthConfig = json_object('clientId', neohiveAccessClientId, 'clientSecret', neohiveAccessClientSecret)
+            WHERE neohiveAccessClientId IS NOT NULL OR neohiveAccessClientSecret IS NOT NULL
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let cfg = SettingsRepository::get_neohive_config(&pool).await.unwrap();
+        assert_eq!(cfg.auth_type.as_deref(), Some("cloudflare_access"));
+
+        let auth_config_json = cfg.auth_config.expect("backfill should have set neohiveAuthConfig");
+        let parsed: serde_json::Value = serde_json::from_str(&auth_config_json).unwrap();
+        assert_eq!(parsed.get("clientId").and_then(|v| v.as_str()), Some("cid-legacy"));
+        assert_eq!(parsed.get("clientSecret").and_then(|v| v.as_str()), Some("csec-legacy"));
+
+        // Strengthen: the backfilled shape must actually produce working Cloudflare auth.
+        let auth = crate::neohive::NeoHiveAuth::from_parts(cfg.auth_type.as_deref(), &parsed).unwrap();
+        assert!(matches!(
+            &auth,
+            crate::neohive::NeoHiveAuth::CloudflareAccess { client_id, client_secret }
+                if client_id == "cid-legacy" && client_secret == "csec-legacy"
+        ));
+    }
 }
