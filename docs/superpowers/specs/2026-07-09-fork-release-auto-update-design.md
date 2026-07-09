@@ -1,0 +1,120 @@
+# Fork Release & Auto-Update Channel — Design
+
+- **Date:** 2026-07-09
+- **Status:** Approved (design); pending implementation plan. **Sequenced AFTER the diarization feature merges to `main`** — this ships as the `v0.5.0` release.
+- **Author:** Nader Awad (with Claude)
+- **Scope:** App distribution / release infrastructure for the personal fork `Nader-Awad/meetily`. Tauri v2 updater configuration, a local release script, and a Dockerized Linux build. No product-feature code.
+- **Provenance:** This is a **personal local fork** (NeoHive memory `meetily-personal-fork`). Do NOT push changes upstream. The fork's own GitHub Releases become the private update channel; nothing is proposed to `Zackriya-Solutions/meetily`.
+
+## 1. Problem & motivation
+
+The user has an installed build (`v0.4.0`, pre-diarization) and wants: (1) a way to update that install to the new (diarization) version, and (2) an ongoing mechanism to build future versions of the fork and release updates to them. The Tauri auto-updater is already compiled into the app but is pointed at **upstream** — it must be repointed to the user's own fork with a key the user controls.
+
+### What already exists (baseline)
+- **Updater fully wired** (`frontend/src-tauri/tauri.conf.json`): `tauri-plugin-updater` (Rust `2.3.0` + JS `@tauri-apps/plugin-updater ^2.3.0`), `bundle.createUpdaterArtifacts: true`, and a `plugins.updater` block with:
+  - `pubkey` = **upstream's** minisign public key.
+  - `endpoints` = `https://github.com/Zackriya-Solutions/meeting-minutes/releases/latest/download/latest.json` (**upstream**).
+- **macOS signing is ad-hoc**: `bundle.macOS.signingIdentity: "-"`, `hardenedRuntime: true`, no Apple Developer ID / no notarization → Gatekeeper requires a one-time manual "Open Anyway" on first launch.
+- **Versions in lockstep at `0.4.0`**: `frontend/package.json`, `frontend/src-tauri/Cargo.toml`, `frontend/src-tauri/tauri.conf.json`. Git tags run through `v0.4.0`.
+- **Local build works**: `frontend/build-gpu.sh` builds the `llama-helper` sidecar (release) then runs `NO_STRIP=true pnpm run tauri:build` (GPU auto-detect via `scripts/tauri-auto.js`). It does **not** currently set updater-signing env.
+- **`@tauri-apps/cli ^2.1.0`** present → `pnpm tauri signer generate` / `pnpm tauri signer sign` are available.
+- **`origin` = `github.com/Nader-Awad/meetily`, PUBLIC** → GitHub Releases can host `latest.json` + artifacts with no auth. Docker (`29.6.1`) is installed locally. Upstream CI workflows exist (`.github/workflows/build-linux.yml`, `build-macos.yml`) to mine for build steps — but are **not** used (local builds only).
+
+## 2. Goals / non-goals
+
+**Goals**
+1. Repoint the updater to the fork: `endpoints` → the fork's `releases/latest/download/latest.json`; `pubkey` → a **new keypair the user owns**.
+2. A single local release script (`scripts/release.sh`) that version-bumps, builds (macOS arm64 natively + Linux via Docker), signs updater artifacts, assembles `latest.json`, tags, and publishes to the fork's GitHub Releases via `gh`.
+3. Auto-update for every version after the first fork-keyed install.
+4. A documented one-time **manual cutover** for the current install → the first fork-keyed build.
+5. A validation dry-run proving the channel end-to-end before relying on it.
+6. Keep private signing material off git; never expose it.
+
+**Non-goals (explicit)**
+- CI/cloud releases (chosen: local builds only). The upstream GitHub Actions workflows are left untouched and unused.
+- Apple Developer ID code-signing / notarization (stay ad-hoc `-`; a one-time Gatekeeper allow is acceptable for personal use).
+- Windows / macOS-Intel targets (chosen platforms: **macOS Apple Silicon + Linux x86_64** only).
+- Delta updates, staged rollouts, multi-channel (stable/beta) release trains.
+- Any change to upstream or any push to a non-fork remote.
+
+## 3. The hard constraint — the first update cannot be automatic
+
+Tauri's updater verifies each downloaded update against the **public key baked into the currently-installed binary**, and checks the **endpoint baked into that binary**. The installed `v0.4.0` carries **upstream's** pubkey and endpoint. Therefore it:
+- cannot verify anything signed with the user's new key, and
+- only ever looks at upstream's release feed.
+
+So the **first fork-keyed build must be installed manually** (open `.dmg` → drag to Applications → right-click **Open** once for Gatekeeper). That build embeds the user's key + fork endpoint. **Every release after it auto-updates in-app.** This cutover is intrinsic to changing key ownership; there is no way to auto-migrate it.
+
+## 4. Architecture / components
+
+- **Update host:** the fork's GitHub Releases. Updater endpoint:
+  `https://github.com/Nader-Awad/meetily/releases/latest/download/latest.json`
+  (`releases/latest/download/…` always resolves to the newest non-prerelease "latest" release; `gh release create` marks latest by default.)
+- **Signing (updater):** a new minisign keypair generated by `pnpm tauri signer generate`. The **public** key replaces `plugins.updater.pubkey` in `tauri.conf.json` (committed). The **private** key + its password live in a git-ignored local location (see §8) and are exported as `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` at build time so `tauri build` emits `.sig` files. This is **independent** of macOS code-signing (which stays ad-hoc).
+- **Builds (local):**
+  - **macOS arm64:** native, via `build-gpu.sh` (builds the sidecar + `tauri:build`), wrapped so signing env is set. Emits `.dmg` (fresh install) + `.app.tar.gz` + `.app.tar.gz.sig` (updater payload).
+  - **Linux x86_64:** in a Docker container (Ubuntu + WebKitGTK/system deps mined from `build-linux.yml` + Rust + pnpm + a Linux `llama-helper` + Linux `ort`/ONNX runtime). Emits the AppImage install artifact + its updater artifact + `.sig`. **Open item (§10):** confirm the exact Linux updater artifact name/format for the installed Tauri version before finalizing `latest.json`.
+- **Manifest:** `scripts/release.sh` assembles `latest.json` (Tauri v2 schema) listing both targets, where each `signature` is the **contents** of the corresponding `.sig` file (base64), not a URL:
+  ```json
+  {
+    "version": "0.5.1",
+    "notes": "See the release page.",
+    "pub_date": "2026-07-09T00:00:00Z",
+    "platforms": {
+      "darwin-aarch64": { "signature": "<contents of the macOS .sig>", "url": "https://github.com/Nader-Awad/meetily/releases/download/v0.5.1/<app>.app.tar.gz" },
+      "linux-x86_64":  { "signature": "<contents of the Linux .sig>",  "url": "https://github.com/Nader-Awad/meetily/releases/download/v0.5.1/<app>.AppImage.tar.gz" }
+    }
+  }
+  ```
+- **Publish:** `gh release create vX.Y.Z <dmg> <app.tar.gz> <app.tar.gz.sig> <AppImage> <AppImage updater artifact> <sig> latest.json --title … --notes …` to `Nader-Awad/meetily`.
+
+## 5. Release process (`scripts/release.sh`)
+1. **Guard:** working tree clean; on `main`; `gh` authenticated to the fork; the three version fields already equal and matching the target (the script bumps them, or verifies a pre-bump).
+2. **Version bump:** set `package.json`, `Cargo.toml` (`[package] version`), and `tauri.conf.json` (`version`) to `X.Y.Z` in lockstep; append a `CHANGELOG.md` entry.
+3. **macOS build:** export signing env; run `build-gpu.sh`; collect `.dmg`, `.app.tar.gz`, `.app.tar.gz.sig`.
+4. **Linux build:** `docker run` the build image over the repo; collect the AppImage + updater artifact + `.sig`.
+5. **Manifest:** generate `latest.json` from the two `.sig` contents + the (predicted) release asset URLs.
+6. **Tag + publish:** commit the version bump, `git tag vX.Y.Z`, `gh release create` with all artifacts + `latest.json`.
+7. **Verify:** curl the `releases/latest/download/latest.json` URL and confirm it parses + lists both platforms.
+
+The script is idempotent-ish and fails fast; a partial failure leaves no tag/release (tag + publish are the last steps).
+
+## 6. Versioning
+- Semver; git tags `vX.Y.Z`. Diarization ships as **`v0.5.0`** (new feature over `0.4.0`).
+- Version is the single source of truth in the three files; the script keeps them in lockstep and refuses to release on a mismatch.
+
+## 7. Cutover + validation flow (concrete)
+Because diarization is done first, the sequence is:
+1. Diarization merged to `main` (via its 13-task plan).
+2. Build this release infra (keypair, config repoint, `release.sh`, Docker Linux build).
+3. **Cutover:** cut `v0.5.0` (= `main`, with diarization) → install the `.dmg` **manually** (Gatekeeper allow once). The user now runs a fork-keyed build with diarization.
+4. **Dry-run validation:** push a trivial `v0.5.1` (e.g. a changelog/no-op bump) → confirm the installed `v0.5.0` detects and auto-installs it in-app. This proves the loop before it's relied upon.
+   - *Reconciliation note:* the user chose both "validate first (dry-run)" and "diarization first." With diarization first, the dry-run is this `v0.5.0 → v0.5.1` hop (post-diarization), not a pre-diarization `v0.4.1`. If instead the intent was to prove the channel on pre-diarization code, that implies doing the infra first — flag at review.
+
+## 8. Security / secrets handling
+- The minisign **private key** and its **password** are **never committed**. Store under a git-ignored path (e.g. `~/.meetily-release/` or a `keys/` dir added to `.gitignore`) with a `keys/README.md` documenting how to regenerate/rotate and how the env vars map. Add a `.gitignore` rule + a guard in `release.sh` that aborts if a key file is staged.
+- Per global credential-safety rules: never print the private key or password; the script reads them from the environment / a protected file, and echoes only presence, never value.
+- **Key loss = loss of the update channel** for installed builds (they only trust the embedded pubkey). Rotating the key requires another manual cutover install. Documented in `keys/README.md`.
+- macOS code-signing stays ad-hoc: acceptable for personal use; the first manual install needs the Gatekeeper allow, and (open item §10) we confirm whether updater-delivered updates re-trigger quarantine.
+
+## 9. Testing strategy
+- **Config sanity:** `tauri.conf.json` parses; `pubkey` is the new key; `endpoints` points at the fork. A tiny check script (or `release.sh --check`) verifies version lockstep + endpoint/pubkey are non-upstream.
+- **Build smoke:** `release.sh` produces all expected artifacts for both targets (existence + non-zero size + `.sig` present).
+- **Manifest:** `latest.json` parses and lists `darwin-aarch64` + `linux-x86_64` with base64 signatures + reachable URLs (post-publish curl).
+- **End-to-end (the real test):** the §7 cutover + `v0.5.0 → v0.5.1` auto-update. This is manual and is the acceptance gate for the channel.
+- No unit-testable product logic here; correctness is verified by the release + update actually working.
+
+## 10. Open items to resolve during planning
+- **Linux updater artifact format** for the installed Tauri v2 version (AppImage vs `.AppImage.tar.gz`, exact filename) — pin the real names before writing `latest.json` assembly.
+- **Docker Linux image recipe:** exact base + system deps (WebKitGTK 4.1, libappindicator, etc.) and how the Linux `llama-helper` sidecar + Linux `ort`/ONNX runtime are produced inside the container; whether GPU features apply (default CPU/vulkan on Linux). Mine `.github/workflows/build-linux.yml`.
+- **`build-gpu.sh` signing wiring:** confirm setting `TAURI_SIGNING_PRIVATE_KEY(+_PASSWORD)` around `tauri:build` yields `.app.tar.gz.sig` given `createUpdaterArtifacts: true`; decide whether to add a `--sign`/env pass-through flag to the script or wrap it in `release.sh`.
+- **Gatekeeper on auto-update:** verify whether updater-delivered replacements of an ad-hoc-signed app launch without a fresh Gatekeeper prompt; if they don't, document the one-time allow.
+- **`gh` auth + "latest" semantics:** confirm `gh release create` marks the release as latest (so `releases/latest/download/latest.json` resolves) and that pre-release flags are not set.
+- **Endpoint URL exactness:** confirm the fork's release-asset URL pattern (`releases/download/vX.Y.Z/<asset>`) matches what the script writes into `latest.json`.
+
+## 11. Conventions
+- Personal fork: local `main` only; never push upstream; releases go to `Nader-Awad/meetily` only.
+- Version lockstep across the three files; tags `vX.Y.Z`.
+- Gitmoji conventional commits; no AI attribution.
+- Secrets never committed or printed.
+- Local builds only; CI workflows untouched.
