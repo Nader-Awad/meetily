@@ -9,7 +9,7 @@ use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 // Sequence counter for transcript updates
 static SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -36,10 +36,111 @@ pub struct TranscriptUpdate {
     pub audio_start_time: f64, // Seconds from recording start (e.g., 125.3)
     pub audio_end_time: f64,   // Seconds from recording start (e.g., 128.6)
     pub duration: f64,          // Segment duration in seconds (e.g., 3.3)
+    // Speaker identification label ("Speaker 1" or a saved profile name);
+    // None when the feature is disabled or no label could be computed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
 }
 
 // NOTE: get_transcript_history and get_recording_meeting_name functions
 // have been moved to recording_commands.rs where they have access to RECORDING_MANAGER
+
+/// Create the per-recording diarization session when the feature is enabled
+/// and the embedding model has been downloaded. Any failure returns None so
+/// speaker labels are simply absent — transcription is never affected.
+async fn init_diarization_session<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Option<crate::diarization::DiarizationSession> {
+    let enabled = match app.try_state::<crate::state::AppState>() {
+        Some(state) => crate::diarization::commands::is_enabled(state.db_manager.pool()).await,
+        None => false,
+    };
+    if !enabled {
+        info!("🎙️ Speaker identification disabled for this recording");
+        return None;
+    }
+    if !crate::diarization::models::is_embedding_model_present(app) {
+        warn!("🎙️ Speaker identification enabled but embedding model not downloaded - labels disabled");
+        return None;
+    }
+    let model_path = match crate::diarization::models::embedding_model_path(app) {
+        Ok(path) => path,
+        Err(e) => {
+            warn!("🎙️ Could not resolve diarization model path: {}", e);
+            return None;
+        }
+    };
+
+    // Seed saved voice profiles so returning speakers are labeled by name
+    let profiles: Vec<(String, Vec<f32>)> = match app.try_state::<crate::state::AppState>() {
+        Some(state) => {
+            match crate::database::repositories::speaker_profile::SpeakerProfilesRepository::list(
+                state.db_manager.pool(),
+            )
+            .await
+            {
+                Ok(profiles) => profiles.into_iter().map(|p| (p.name, p.embedding)).collect(),
+                Err(e) => {
+                    warn!("🎙️ Failed to load voice profiles, continuing without: {}", e);
+                    Vec::new()
+                }
+            }
+        }
+        None => Vec::new(),
+    };
+    let profile_count = profiles.len();
+
+    match crate::diarization::DiarizationSession::with_profiles(&model_path, profiles) {
+        Ok(session) => {
+            info!(
+                "🎙️ ✅ Speaker identification active for this recording ({} saved profile{})",
+                profile_count,
+                if profile_count == 1 { "" } else { "s" }
+            );
+            Some(session)
+        }
+        Err(e) => {
+            warn!("🎙️ Failed to initialize speaker identification: {}", e);
+            None
+        }
+    }
+}
+
+/// Persist this recording's speaker centroids to speakers.json in the meeting
+/// folder so a later rename can save the voice as a profile. The folder must
+/// be captured while the recording manager is still alive.
+async fn persist_speaker_centroids(
+    session: &crate::diarization::DiarizationSession,
+    folder: Option<std::path::PathBuf>,
+) {
+    let snapshot = session.centroid_snapshot();
+    if snapshot.is_empty() {
+        return;
+    }
+    let folder = match folder {
+        Some(folder) => folder,
+        None => {
+            warn!("🎙️ No meeting folder available - speaker centroids not persisted");
+            return;
+        }
+    };
+    let json = serde_json::json!({
+        "version": "1.0",
+        "speakers": snapshot.iter().map(|(label, centroid, count)| {
+            serde_json::json!({ "label": label, "centroid": centroid, "segments": count })
+        }).collect::<Vec<_>>(),
+    });
+    let path = folder.join("speakers.json");
+    match serde_json::to_string(&json).map(|s| std::fs::write(&path, s)) {
+        Ok(Ok(())) => info!(
+            "🎙️ Saved {} speaker centroid(s) to {}",
+            snapshot.len(),
+            path.display()
+        ),
+        Ok(Err(e)) => warn!("🎙️ Failed to write speakers.json: {}", e),
+        Err(e) => warn!("🎙️ Failed to serialize speaker centroids: {}", e),
+    }
+}
 
 /// Optimized parallel transcription task ensuring ZERO chunk loss
 pub fn start_transcription_task<R: Runtime>(
@@ -62,6 +163,16 @@ pub fn start_transcription_task<R: Runtime>(
                 return;
             }
         };
+
+        // Initialize speaker identification if enabled and its model is present.
+        // Failure only disables speaker labels; transcription proceeds normally.
+        let diarization_session = Arc::new(tokio::sync::Mutex::new(
+            init_diarization_session(&app).await,
+        ));
+        // Meeting folder for speakers.json, captured lazily while the recording
+        // manager still exists (it is torn down during stop).
+        let diarization_folder: Arc<tokio::sync::Mutex<Option<std::path::PathBuf>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
 
         // Create parallel workers for faster processing while preserving ALL chunks
         const NUM_WORKERS: usize = 1; // Serial processing ensures transcripts emit in chronological order
@@ -88,6 +199,8 @@ pub fn start_transcription_task<R: Runtime>(
             let chunks_completed_clone = chunks_completed.clone();
             let input_finished_clone = input_finished.clone();
             let chunks_queued_clone = chunks_queued.clone();
+            let diarization_clone = diarization_session.clone();
+            let diarization_folder_clone = diarization_folder.clone();
 
             let worker_handle = tokio::spawn(async move {
                 info!("👷 Worker {} started", worker_id);
@@ -143,6 +256,29 @@ pub fn start_transcription_task<R: Runtime>(
                             let chunk_timestamp = chunk.timestamp;
                             let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
 
+                            let chunk_id_for_logging = chunk.chunk_id;
+
+                            // Keep segment samples for speaker embedding (STT consumes the chunk).
+                            // Diarization (fbank + WeSpeaker) requires 16kHz mono; chunks arrive at
+                            // the device rate (e.g. 48kHz), so resample to match — feeding raw 48kHz
+                            // to the fbank frontend would corrupt the frequency mapping.
+                            let diarization_samples: Option<Vec<f32>> = {
+                                let guard = diarization_clone.lock().await;
+                                if guard.is_some() {
+                                    if chunk.sample_rate != 16000 {
+                                        Some(crate::audio::audio_processing::resample_audio(
+                                            &chunk.data,
+                                            chunk.sample_rate,
+                                            16000,
+                                        ))
+                                    } else {
+                                        Some(chunk.data.clone())
+                                    }
+                                } else {
+                                    None
+                                }
+                            };
+
                             // Transcribe with provider-agnostic approach
                             match transcribe_chunk_with_provider(
                                 &engine_clone,
@@ -196,6 +332,36 @@ pub fn start_transcription_task<R: Runtime>(
                                         let audio_start_time = chunk_timestamp; // Already in seconds from recording start
                                         let audio_end_time = chunk_timestamp + chunk_duration;
 
+                                        // Assign a speaker label from this segment's voice embedding.
+                                        // Best-effort: any failure yields None and never affects the transcript.
+                                        let speaker: Option<String> = if let Some(samples) =
+                                            &diarization_samples
+                                        {
+                                            // Capture the meeting folder once, while recording is live.
+                                            {
+                                                let mut folder_guard =
+                                                    diarization_folder_clone.lock().await;
+                                                if folder_guard.is_none() {
+                                                    if let Ok(Some(folder)) =
+                                                        crate::audio::recording_commands::get_meeting_folder_path().await
+                                                    {
+                                                        *folder_guard =
+                                                            Some(std::path::PathBuf::from(folder));
+                                                    }
+                                                }
+                                            }
+                                            let mut guard = diarization_clone.lock().await;
+                                            guard.as_mut().and_then(|session| session.label_segment(samples))
+                                        } else {
+                                            None
+                                        };
+                                        if should_log_this_chunk && speaker.is_some() {
+                                            info!(
+                                                "🎙️ Worker {} labeled chunk {} as speaker={:?}",
+                                                worker_id, chunk_id_for_logging, speaker
+                                            );
+                                        }
+
                                         // Save structured transcript segment to recording manager (only final results)
                                         // Save ALL segments (partial and final) to ensure complete JSON
                                         // Create structured segment with full timestamp data
@@ -217,6 +383,7 @@ pub fn start_transcription_task<R: Runtime>(
                                             audio_start_time,
                                             audio_end_time,
                                             duration: chunk_duration,
+                                            speaker,
                                         };
 
                                         if let Err(e) = app_clone.emit("transcript-update", &update)
@@ -356,6 +523,13 @@ pub fn start_transcription_task<R: Runtime>(
             } else {
                 info!("✅ Worker {} completed successfully", worker_id);
             }
+        }
+
+        // Persist speaker centroids so a later rename can save the voice as a
+        // profile (must run before the recording manager is torn down).
+        if let Some(session) = diarization_session.lock().await.as_ref() {
+            let folder = diarization_folder.lock().await.clone();
+            persist_speaker_centroids(session, folder).await;
         }
 
         // Final verification with retry logic to catch any stragglers
