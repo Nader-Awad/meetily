@@ -38,8 +38,9 @@ echo "▶ Building (this compiles the llama-helper sidecar + the Tauri app; seve
 ( cd "$FRONTEND" && ./build-gpu.sh )
 unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 
-# --- Locate artifacts by glob (path varies with --target) ---
-BUNDLE_ROOT="$FRONTEND/src-tauri/target"
+# --- Locate artifacts by glob (Cargo WORKSPACE → bundles land under repo-root target/;
+#     path also varies with --target, hence the glob) ---
+BUNDLE_ROOT="$ROOT/target"
 APP_TARGZ=$(find "$BUNDLE_ROOT" -path '*/release/bundle/macos/*.app.tar.gz' | head -1)
 APP_SIG=$(find "$BUNDLE_ROOT" -path '*/release/bundle/macos/*.app.tar.gz.sig' | head -1)
 DMG=$(find "$BUNDLE_ROOT" -path '*/release/bundle/dmg/*.dmg' | head -1)
