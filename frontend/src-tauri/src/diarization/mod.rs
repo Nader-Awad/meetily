@@ -7,6 +7,7 @@
 // overlap/timeline machinery. See docs in each module.
 
 pub mod clustering;
+pub mod commands;
 pub mod embedding;
 pub mod fbank;
 pub mod models;
