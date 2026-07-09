@@ -8,3 +8,4 @@
 
 pub mod fbank;
 pub mod embedding;
+pub mod clustering;
