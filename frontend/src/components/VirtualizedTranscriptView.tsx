@@ -34,10 +34,25 @@ export interface VirtualizedTranscriptViewProps {
     totalCount?: number;
     loadedCount?: number;
     onLoadMore?: () => void;
+
+    /** Called when a speaker chip is clicked (saved-meeting view only; live view is display-only) */
+    onSpeakerClick?: (label: string) => void;
 }
 
 // Threshold for enabling virtualization (below this, use simple rendering)
 const VIRTUALIZATION_THRESHOLD = 10;
+
+// Deterministic chip color from the label so the same speaker keeps one color.
+function speakerChipColor(label: string): string {
+    const palette = [
+        'bg-blue-100 text-blue-700', 'bg-green-100 text-green-700',
+        'bg-purple-100 text-purple-700', 'bg-amber-100 text-amber-700',
+        'bg-pink-100 text-pink-700', 'bg-cyan-100 text-cyan-700',
+    ];
+    let hash = 0;
+    for (let i = 0; i < label.length; i++) hash = (hash * 31 + label.charCodeAt(i)) | 0;
+    return palette[Math.abs(hash) % palette.length];
+}
 
 // Helper function to format seconds as recording-relative time [MM:SS]
 function formatRecordingTime(seconds: number | undefined): string {
@@ -69,17 +84,30 @@ const TranscriptSegment = memo(function TranscriptSegment({
     timestamp,
     text,
     confidence,
+    speaker,
     isStreaming,
     showConfidence,
+    onSpeakerClick,
 }: {
     id: string;
     timestamp: number;
     text: string;
     confidence?: number;
+    speaker?: string;
     isStreaming: boolean;
     showConfidence: boolean;
+    onSpeakerClick?: (label: string) => void;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
+
+    const speakerChip = speaker && (
+        <span
+            onClick={onSpeakerClick ? (e) => { e.stopPropagation(); onSpeakerClick(speaker); } : undefined}
+            className={`inline-block mr-2 px-1.5 py-0.5 rounded text-xs font-medium ${speakerChipColor(speaker)}${onSpeakerClick ? ' cursor-pointer hover:opacity-80' : ''}`}
+        >
+            {speaker}
+        </span>
+    );
 
     return (
         <div id={`segment-${id}`} className="mb-3">
@@ -99,10 +127,10 @@ const TranscriptSegment = memo(function TranscriptSegment({
                 <div className="flex-1">
                     {isStreaming ? (
                         <div className="bg-gray-100 border border-gray-200 rounded-lg px-3 py-2">
-                            <p className="text-base text-gray-800 leading-relaxed">{displayText}</p>
+                            <p className="text-base text-gray-800 leading-relaxed">{speakerChip}{displayText}</p>
                         </div>
                     ) : (
-                        <p className="text-base text-gray-800 leading-relaxed">{displayText}</p>
+                        <p className="text-base text-gray-800 leading-relaxed">{speakerChip}{displayText}</p>
                     )}
                 </div>
             </div>
@@ -124,6 +152,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     totalCount = 0,
     loadedCount = 0,
     onLoadMore,
+    onSpeakerClick,
 }) => {
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -294,8 +323,10 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
+                                        speaker={segment.speaker}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        onSpeakerClick={onSpeakerClick}
                                     />
                                 </div>
                             );
@@ -350,8 +381,10 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
+                                        speaker={segment.speaker}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        onSpeakerClick={onSpeakerClick}
                                     />
                                 </motion.div>
                             );

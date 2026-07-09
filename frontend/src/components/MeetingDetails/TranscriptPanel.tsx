@@ -4,7 +4,8 @@ import { Transcript, TranscriptSegmentData } from '@/types';
 import { TranscriptView } from '@/components/TranscriptView';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useMemo } from 'react';
+import { SpeakerRenameDialog } from '@/components/SpeakerRenameDialog';
+import { useMemo, useState } from 'react';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -49,6 +50,9 @@ export function TranscriptPanel({
   meetingFolderPath,
   onRefetchTranscripts,
 }: TranscriptPanelProps) {
+  // Which speaker label (if any) is being renamed via SpeakerRenameDialog.
+  const [renameSpeaker, setRenameSpeaker] = useState<string | null>(null);
+
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
     if (usePagination && segments) {
@@ -61,6 +65,7 @@ export function TranscriptPanel({
       endTime: t.audio_end_time,
       text: t.text,
       confidence: t.confidence,
+      speaker: t.speaker,
     }));
   }, [transcripts, usePagination, segments]);
 
@@ -94,6 +99,7 @@ export function TranscriptPanel({
           totalCount={totalCount}
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
+          onSpeakerClick={meetingId ? (label) => setRenameSpeaker(label) : undefined}
         />
       </div>
 
@@ -107,6 +113,18 @@ export function TranscriptPanel({
             onChange={(e) => onPromptChange(e.target.value)}
           />
         </div>
+      )}
+
+      {renameSpeaker && meetingId && (
+        <SpeakerRenameDialog
+          meetingId={meetingId}
+          speakerLabel={renameSpeaker}
+          onClose={() => setRenameSpeaker(null)}
+          onRenamed={async () => {
+            setRenameSpeaker(null);
+            await onRefetchTranscripts?.();
+          }}
+        />
       )}
     </div>
   );
