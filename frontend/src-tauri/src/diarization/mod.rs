@@ -1,0 +1,9 @@
+// diarization/mod.rs
+//
+// Speaker identification (diarization) for the live transcription pipeline.
+// Rust-native and fully local: WeSpeaker CAM++ ONNX embeddings (via ort, the
+// same runtime Parakeet uses) + online cosine clustering. Adapted from the
+// diarization slice of upstream PR #538 (author: rodrigopg), trimmed of the
+// overlap/timeline machinery. See docs in each module.
+
+pub mod fbank;
