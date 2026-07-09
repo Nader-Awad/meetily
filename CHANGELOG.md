@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.2 — 2026-07-09
+
+- **Selectable NeoHive connection auth.** Beyond the existing Cloudflare Access service
+  token, you can now connect a NeoHive instance via Bearer token / API key, Basic auth,
+  a custom header, or "None (network-level)" — the last for instances reached over
+  Tailscale / LAN / VPN with no app credentials. Choose the method under
+  Settings → Workflows → NeoHive. Existing Cloudflare setups are migrated automatically.
+
 ## v0.5.1 — 2026-07-09
 
 Fix: the **Speaker identification** toggle was mounted in an unused settings component and
