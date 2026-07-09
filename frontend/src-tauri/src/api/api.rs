@@ -6,7 +6,7 @@ use tauri_plugin_store::StoreExt;
 
 use crate::{
     database::{
-        models::MeetingModel,
+        models::{MeetingModel, Transcript},
         repositories::{
             meeting::MeetingsRepository, setting::SettingsRepository,
             transcript::TranscriptsRepository,
@@ -137,6 +137,22 @@ pub struct MeetingTranscript {
     pub audio_end_time: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+}
+
+impl From<Transcript> for MeetingTranscript {
+    fn from(t: Transcript) -> Self {
+        MeetingTranscript {
+            id: t.id,
+            text: t.transcript,
+            timestamp: t.timestamp,
+            audio_start_time: t.audio_start_time,
+            audio_end_time: t.audio_end_time,
+            duration: t.duration,
+            speaker: t.speaker,
+        }
+    }
 }
 
 /// Meeting metadata without transcripts (for pagination)
@@ -188,6 +204,8 @@ pub struct TranscriptSegment {
     pub audio_end_time: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -871,14 +889,7 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
             // Convert Transcript to MeetingTranscript
             let meeting_transcripts = transcripts
                 .into_iter()
-                .map(|t| MeetingTranscript {
-                    id: t.id,
-                    text: t.transcript,
-                    timestamp: t.timestamp,
-                    audio_start_time: t.audio_start_time,
-                    audio_end_time: t.audio_end_time,
-                    duration: t.duration,
-                })
+                .map(MeetingTranscript::from)
                 .collect::<Vec<_>>();
 
             let has_more = (offset + meeting_transcripts.len() as i64) < total_count;
@@ -1379,5 +1390,29 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                 Err(format!("Connection failed: {}", e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn meeting_transcript_conversion_preserves_speaker_label() {
+        let transcript = crate::database::models::Transcript {
+            id: "t1".to_string(),
+            meeting_id: "m1".to_string(),
+            transcript: "hello".to_string(),
+            timestamp: "00:00:01".to_string(),
+            summary: None,
+            action_items: None,
+            key_points: None,
+            audio_start_time: Some(1.0),
+            audio_end_time: Some(2.0),
+            duration: Some(1.0),
+            speaker: Some("Speaker 2".to_string()),
+        };
+        let meeting_transcript: MeetingTranscript = transcript.into();
+        assert_eq!(meeting_transcript.speaker.as_deref(), Some("Speaker 2"));
     }
 }
