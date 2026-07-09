@@ -6,6 +6,10 @@
 // diarization slice of upstream PR #538 (author: rodrigopg), trimmed of the
 // overlap/timeline machinery. See docs in each module.
 
-pub mod fbank;
-pub mod embedding;
 pub mod clustering;
+pub mod embedding;
+pub mod fbank;
+pub mod models;
+pub mod session;
+
+pub use session::DiarizationSession;
