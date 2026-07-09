@@ -77,7 +77,9 @@ if [ "$DRY_RUN" = "--dry-run" ]; then
 fi
 
 # --- Tag + publish ---
-git -C "$ROOT" tag "$TAG"
+# Annotated + messaged so it works under tag.gpgsign/forceSignAnnotated (a plain
+# lightweight tag errors "no tag message?" when signing is forced).
+git -C "$ROOT" tag -a "$TAG" -m "Release $TAG"
 echo "▶ Publishing GitHub Release $TAG on $REPO…"
 gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file "$ROOT/CHANGELOG.md" \
   "$DMG" "$APP_TARGZ" "$APP_SIG" "$LATEST_JSON"
