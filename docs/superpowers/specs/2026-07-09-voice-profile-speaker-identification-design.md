@@ -47,7 +47,7 @@ The evaluation of PR #538 confirmed its diarization core is a working, self-cont
 
 New module `frontend/src-tauri/src/diarization/`:
 - `fbank.rs` — Kaldi-compatible 80-dim log-mel filterbank (25 ms Povey window, 10 ms shift, CMN). Pure Rust via `realfft`. (~3 unit tests.)
-- `embedding.rs` — `EmbeddingExtractor`: WeSpeaker **CAM++** ONNX model via `ort`, L2-normalized 192-dim embedding.
+- `embedding.rs` — `EmbeddingExtractor`: WeSpeaker **CAM++** ONNX model via `ort`, L2-normalized 192-dim embedding. **On macOS, register `ort`'s CoreML execution provider** for this session (feature-gated) so supported ops offload to the Apple Neural Engine / GPU, with automatic fallback to CPU (and CPU on other platforms). Not guaranteed to run entirely on the ANE, but a near-free acceleration for the per-segment embedding.
 - `clustering.rs` — `SpeakerClusterer`: online cosine-similarity clustering (running-mean centroids; thresholds ≈0.55 intra-meeting, ≈0.60 profile-match; speaker cap ~10), assigns `Speaker N`. `seed_profile()` for pre-known voices. (~3 tests.)
 - `session.rs` — `DiarizationSession`: per-meeting orchestration; `with_profiles()` seeds saved profiles at start; `label_segment(...)` returns a label for a segment's audio. (~5 tests.) **Trim** any dependence on the excluded timeline/overlap machinery — v1 labels per segment directly.
 - `models.rs` — model metadata + on-demand download (~28 MB, GitHub release URL) into `<app_data>/models/diarization/`, mirroring `parakeet_engine`'s atomic download + progress events.
@@ -74,6 +74,7 @@ In `audio/transcription/worker.rs`, after a segment is transcribed:
 - Run the ONNX embedding inside `tokio::task::spawn_blocking` (or the worker's blocking context) — do not block the async worker loop on `session.run()`.
 - Do **not** recompute over the full growing timeline per chunk (the PR's inefficiency); label the current segment only.
 - Respect the hot-path logging convention (`perf_debug!`/`perf_trace!`), never plain `log::debug!` per chunk.
+- **macOS acceleration:** register `ort`'s CoreML execution provider for the embedding session (see §4), falling back to CPU. Since the embedding runs once per speech *segment* (seconds apart) on a small model, this is a modest but free win — the load is light either way, so CPU-only is an acceptable fallback and non-macOS remains CPU.
 
 ## 7. Model management
 
@@ -107,12 +108,17 @@ Diarization is strictly best-effort and isolated: any failure (setting disabled,
 ## 13. Out of scope (v1) — recap
 Overlap/concurrent-speaker resolution; mic-channel "Me" auto-enrollment; all non-diarization features bundled in PR #538.
 
+### Future optimizations (tracked for this local fork, post-v1)
+- **Mac-native ANE diarization via FluidAudio (or Argmax SpeakerKit).** These Swift/CoreML libraries run the *same* models we're using (pyannote segmentation + WeSpeaker embedding) fully on the Apple Neural Engine, for the best performance-per-watt. Deferred because it requires a Swift↔Rust bridge into the Tauri core (precedent exists via `cidre`/`enhanced_macos`, but it's real work) and is macOS-only, whereas the v1 ONNX/`ort` path is cross-platform and the per-segment embedding load is already light. Revisit if diarization becomes a measured bottleneck. Decided 2026-07-09 (chose the pragmatic `ort` CoreML-EP path for v1).
+- **macOS 26 `SpeechAnalyzer` for transcription** (separate from diarization): reportedly ~2× faster than Whisper Large V3 Turbo and ANE-native — a candidate to accelerate Meetily's *transcription* on macOS, unrelated to this feature.
+
 ## 14. Open items to resolve during planning
 - Exact `worker.rs` splice: where in the segment-emit path to call labeling, and how to obtain the segment's 16 kHz mono samples there.
 - Exact set of `Transcript`/`TranscriptSegment` fields to add (the PR added several; take only what the label path needs — likely just `speaker`, plus whatever the save/read requires).
 - The pinned WeSpeaker CAM++ model URL + checksum.
 - Frontend reconciliation: mapping the PR's transcript-view edits onto our current components.
 - Whether `session.rs`/`clustering.rs` can be lifted cleanly once `timeline.rs`/`overlap_detector.rs` are excluded (trim any references).
+- Confirm `ort`'s `coreml` feature is enabled (or enable it) and the pinned `ort` version supports the CoreML execution provider; wire the EP registration on macOS with graceful CPU fallback, and sanity-check ANE-vs-CPU behavior.
 
 ## 15. Conventions
 - All behavior via Tauri commands in the Rust core; register in `lib.rs` `generate_handler!`. `api_*`/existing command-naming style; snake_case Rust with serde camelCase at the TS boundary.
