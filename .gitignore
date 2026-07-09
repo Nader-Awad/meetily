@@ -76,4 +76,10 @@ experiments/
 .cursor/
 target/
 
+# Updater signing material must never be committed (keys live in ~/.meetily-release/)
+*.key
+*.key.pub
+# Generated release manifest (uploaded to the GitHub Release, not committed)
+/latest.json
+
 frontend/src-tauri/binaries/
