@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.5.5 — 2026-07-10
+
+- **Renaming a speaker no longer mislabels everyone else.** Naming a speaker now
+  relabels only that speaker; it no longer auto-sweeps other detected speakers into
+  the same name (which could cascade and was hard to correct). To combine two detected
+  speakers you know are the same person, use the new picklist (below).
+- **Pick from people you've already named.** The rename dialog now lets you select a
+  person you've already added — a saved voice profile or someone already named in this
+  meeting — instead of only typing into an empty box. Picking an existing name is the
+  deliberate, safe way to say "this speaker is the same person as that one."
+
 ## v0.5.4 — 2026-07-10
 
 - **Much better speaker separation on Retranscribe & Import.** Speaker labeling on the
