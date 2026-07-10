@@ -9,7 +9,7 @@ use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 
 // Sequence counter for transcript updates
 static SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -45,103 +45,6 @@ pub struct TranscriptUpdate {
 // NOTE: get_transcript_history and get_recording_meeting_name functions
 // have been moved to recording_commands.rs where they have access to RECORDING_MANAGER
 
-/// Create the per-recording diarization session when the feature is enabled
-/// and the embedding model has been downloaded. Any failure returns None so
-/// speaker labels are simply absent — transcription is never affected.
-async fn init_diarization_session<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Option<crate::diarization::DiarizationSession> {
-    let enabled = match app.try_state::<crate::state::AppState>() {
-        Some(state) => crate::diarization::commands::is_enabled(state.db_manager.pool()).await,
-        None => false,
-    };
-    if !enabled {
-        info!("🎙️ Speaker identification disabled for this recording");
-        return None;
-    }
-    if !crate::diarization::models::is_embedding_model_present(app) {
-        warn!("🎙️ Speaker identification enabled but embedding model not downloaded - labels disabled");
-        return None;
-    }
-    let model_path = match crate::diarization::models::embedding_model_path(app) {
-        Ok(path) => path,
-        Err(e) => {
-            warn!("🎙️ Could not resolve diarization model path: {}", e);
-            return None;
-        }
-    };
-
-    // Seed saved voice profiles so returning speakers are labeled by name
-    let profiles: Vec<(String, Vec<f32>)> = match app.try_state::<crate::state::AppState>() {
-        Some(state) => {
-            match crate::database::repositories::speaker_profile::SpeakerProfilesRepository::list(
-                state.db_manager.pool(),
-            )
-            .await
-            {
-                Ok(profiles) => profiles.into_iter().map(|p| (p.name, p.embedding)).collect(),
-                Err(e) => {
-                    warn!("🎙️ Failed to load voice profiles, continuing without: {}", e);
-                    Vec::new()
-                }
-            }
-        }
-        None => Vec::new(),
-    };
-    let profile_count = profiles.len();
-
-    match crate::diarization::DiarizationSession::with_profiles(&model_path, profiles) {
-        Ok(session) => {
-            info!(
-                "🎙️ ✅ Speaker identification active for this recording ({} saved profile{})",
-                profile_count,
-                if profile_count == 1 { "" } else { "s" }
-            );
-            Some(session)
-        }
-        Err(e) => {
-            warn!("🎙️ Failed to initialize speaker identification: {}", e);
-            None
-        }
-    }
-}
-
-/// Persist this recording's speaker centroids to speakers.json in the meeting
-/// folder so a later rename can save the voice as a profile. The folder must
-/// be captured while the recording manager is still alive.
-async fn persist_speaker_centroids(
-    session: &crate::diarization::DiarizationSession,
-    folder: Option<std::path::PathBuf>,
-) {
-    let snapshot = session.centroid_snapshot();
-    if snapshot.is_empty() {
-        return;
-    }
-    let folder = match folder {
-        Some(folder) => folder,
-        None => {
-            warn!("🎙️ No meeting folder available - speaker centroids not persisted");
-            return;
-        }
-    };
-    let json = serde_json::json!({
-        "version": "1.0",
-        "speakers": snapshot.iter().map(|(label, centroid, count)| {
-            serde_json::json!({ "label": label, "centroid": centroid, "segments": count })
-        }).collect::<Vec<_>>(),
-    });
-    let path = folder.join("speakers.json");
-    match serde_json::to_string(&json).map(|s| std::fs::write(&path, s)) {
-        Ok(Ok(())) => info!(
-            "🎙️ Saved {} speaker centroid(s) to {}",
-            snapshot.len(),
-            path.display()
-        ),
-        Ok(Err(e)) => warn!("🎙️ Failed to write speakers.json: {}", e),
-        Err(e) => warn!("🎙️ Failed to serialize speaker centroids: {}", e),
-    }
-}
-
 /// Optimized parallel transcription task ensuring ZERO chunk loss
 pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
@@ -167,7 +70,7 @@ pub fn start_transcription_task<R: Runtime>(
         // Initialize speaker identification if enabled and its model is present.
         // Failure only disables speaker labels; transcription proceeds normally.
         let diarization_session = Arc::new(tokio::sync::Mutex::new(
-            init_diarization_session(&app).await,
+            crate::diarization::commands::init_session(&app).await,
         ));
         // Meeting folder for speakers.json, captured lazily while the recording
         // manager still exists (it is torn down during stop).
@@ -529,7 +432,7 @@ pub fn start_transcription_task<R: Runtime>(
         // profile (must run before the recording manager is torn down).
         if let Some(session) = diarization_session.lock().await.as_ref() {
             let folder = diarization_folder.lock().await.clone();
-            persist_speaker_centroids(session, folder).await;
+            crate::diarization::commands::persist_speaker_centroids(session, folder).await;
         }
 
         // Final verification with retry logic to catch any stragglers

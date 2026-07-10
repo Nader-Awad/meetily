@@ -7,7 +7,7 @@
 use crate::database::repositories::speaker_profile::SpeakerProfilesRepository;
 use crate::state::AppState;
 use sqlx::SqlitePool;
-use tauri::{command, AppHandle, Runtime};
+use tauri::{command, AppHandle, Manager, Runtime};
 
 pub async fn is_enabled(pool: &SqlitePool) -> bool {
     sqlx::query_scalar::<_, i64>("SELECT enabled FROM diarization_settings WHERE id = '1'")
@@ -176,4 +176,90 @@ pub async fn diarization_delete_profile(
     SpeakerProfilesRepository::delete(state.db_manager.pool(), &id)
         .await
         .map_err(|e| format!("Failed to delete voice profile: {}", e))
+}
+
+/// Create a diarization session for a recording/batch job when the feature is
+/// enabled AND the embedding model is present. Seeds saved voice profiles so
+/// returning speakers are labeled by name. Any failure returns None so speaker
+/// labels are simply absent — transcription is never affected.
+pub async fn init_session<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Option<super::DiarizationSession> {
+    let enabled = match app.try_state::<AppState>() {
+        Some(state) => is_enabled(state.db_manager.pool()).await,
+        None => false,
+    };
+    if !enabled {
+        log::info!("🎙️ Speaker identification disabled");
+        return None;
+    }
+    if !super::models::is_embedding_model_present(app) {
+        log::warn!("🎙️ Speaker identification enabled but embedding model not downloaded - labels disabled");
+        return None;
+    }
+    let model_path = match super::models::embedding_model_path(app) {
+        Ok(path) => path,
+        Err(e) => {
+            log::warn!("🎙️ Could not resolve diarization model path: {}", e);
+            return None;
+        }
+    };
+
+    let profiles: Vec<(String, Vec<f32>)> = match app.try_state::<AppState>() {
+        Some(state) => match SpeakerProfilesRepository::list(state.db_manager.pool()).await {
+            Ok(profiles) => profiles.into_iter().map(|p| (p.name, p.embedding)).collect(),
+            Err(e) => {
+                log::warn!("🎙️ Failed to load voice profiles, continuing without: {}", e);
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+    let profile_count = profiles.len();
+
+    match super::DiarizationSession::with_profiles(&model_path, profiles) {
+        Ok(session) => {
+            log::info!(
+                "🎙️ ✅ Speaker identification active ({} saved profile{})",
+                profile_count,
+                if profile_count == 1 { "" } else { "s" }
+            );
+            Some(session)
+        }
+        Err(e) => {
+            log::warn!("🎙️ Failed to initialize speaker identification: {}", e);
+            None
+        }
+    }
+}
+
+/// Persist a session's speaker centroids to speakers.json in the meeting folder
+/// so a later rename can save the voice as a persistent profile.
+pub async fn persist_speaker_centroids(
+    session: &super::DiarizationSession,
+    folder: Option<std::path::PathBuf>,
+) {
+    let snapshot = session.centroid_snapshot();
+    if snapshot.is_empty() {
+        return;
+    }
+    let folder = match folder {
+        Some(folder) => folder,
+        None => {
+            log::warn!("🎙️ No meeting folder available - speaker centroids not persisted");
+            return;
+        }
+    };
+    let json = serde_json::json!({
+        "version": "1.0",
+        "speakers": snapshot.iter().map(|(label, centroid, count)| {
+            serde_json::json!({ "label": label, "centroid": centroid, "segments": count })
+        }).collect::<Vec<_>>(),
+    });
+    let path = folder.join("speakers.json");
+    match serde_json::to_string(&json).map(|s| std::fs::write(&path, s)) {
+        Ok(Ok(())) => log::info!("🎙️ Saved {} speaker centroid(s) to {}", snapshot.len(), path.display()),
+        Ok(Err(e)) => log::warn!("🎙️ Failed to write speakers.json: {}", e),
+        Err(e) => log::warn!("🎙️ Failed to serialize speaker centroids: {}", e),
+    }
 }
