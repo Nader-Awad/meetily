@@ -150,6 +150,10 @@ export function SpeakerIdentificationSettings() {
             Label who said what in transcripts. Runs fully on-device; voice data never
             leaves your computer.
           </p>
+          <p className="text-xs text-gray-500 mt-1">
+            The first time you retranscribe or import with this on, speaker models
+            (a few hundred MB) download once — that run will be slower.
+          </p>
         </div>
         <Switch checked={status.enabled} onCheckedChange={handleToggle} />
       </div>
