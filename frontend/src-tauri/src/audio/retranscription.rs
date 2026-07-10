@@ -170,25 +170,6 @@ fn find_audio_file(folder: &Path) -> Result<PathBuf> {
     Err(anyhow!("No audio file found in: {}", folder.display()))
 }
 
-/// Average a summed CAM++ embedding by its contributing sample count and
-/// re-normalize to unit length (mirrors `SpeakerClusterer`'s running-mean
-/// update). Used by the diarization turn path to build per-speaker centroids
-/// from accumulated per-unit embeddings.
-fn average_normalized_centroid(sum: &[f32], count: usize) -> Vec<f32> {
-    let mut avg: Vec<f32> = if count > 0 {
-        sum.iter().map(|v| v / count as f32).collect()
-    } else {
-        sum.to_vec()
-    };
-    let norm = avg.iter().map(|v| v * v).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for v in avg.iter_mut() {
-            *v /= norm;
-        }
-    }
-    avg
-}
-
 /// Internal function to run retranscription
 async fn run_retranscription<R: Runtime>(
     app: AppHandle<R>,
@@ -394,7 +375,7 @@ async fn run_retranscription<R: Runtime>(
         // sidecar instead of VAD segment boundaries, and build per-local-
         // speaker centroids from CAM++ embeddings for profile mapping.
         let units_count = units.len();
-        let mut local_centroid_sums: HashMap<String, (Vec<f32>, usize)> = HashMap::new();
+        let mut local_embeddings: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
         // `map_local_speakers_to_profiles` numbers unmatched speakers "Speaker N"
         // by first appearance; HashMap iteration order is random, so track
         // first-appearance order separately instead of relying on it.
@@ -468,23 +449,21 @@ async fn run_retranscription<R: Runtime>(
                 if trimmed.len() > 80 { let mut end = 80; while !trimmed.is_char_boundary(end) { end -= 1; } &trimmed[..end] } else { trimmed }
             );
 
-            // Accumulate a running centroid per local speaker label. Best-effort:
+            // Accumulate raw embeddings per local speaker label. Best-effort:
             // a too-short/failed embedding just means this unit doesn't
             // contribute to the centroid — the transcript is kept regardless.
+            // Averaging + L2-normalizing happens below, via the shared
+            // `diarization::batch` helper (mismatched-dimension embeddings
+            // are dropped there rather than at accumulation time).
             if let Some(session) = diarization.as_mut() {
                 if let Some(embedding) = session.embed(&unit_samples) {
-                    if !local_centroid_sums.contains_key(&unit.speaker_local) {
+                    if !local_embeddings.contains_key(&unit.speaker_local) {
                         local_speaker_order.push(unit.speaker_local.clone());
                     }
-                    let entry = local_centroid_sums
+                    local_embeddings
                         .entry(unit.speaker_local.clone())
-                        .or_insert_with(|| (vec![0.0f32; embedding.len()], 0));
-                    if entry.0.len() == embedding.len() {
-                        for (acc, v) in entry.0.iter_mut().zip(embedding.iter()) {
-                            *acc += v;
-                        }
-                        entry.1 += 1;
-                    }
+                        .or_default()
+                        .push(embedding);
                 }
             }
 
@@ -498,9 +477,10 @@ async fn run_retranscription<R: Runtime>(
         let local_centroids: Vec<(String, Vec<f32>)> = local_speaker_order
             .iter()
             .filter_map(|label| {
-                local_centroid_sums
-                    .get(label)
-                    .map(|(sum, count)| (label.clone(), average_normalized_centroid(sum, *count)))
+                local_embeddings.get(label).and_then(|embeddings| {
+                    crate::diarization::batch::average_normalized_centroid(embeddings)
+                        .map(|centroid| (label.clone(), centroid))
+                })
             })
             .collect();
 
@@ -528,29 +508,10 @@ async fn run_retranscription<R: Runtime>(
 
         // Re-key the accumulated centroids under final labels (merging local
         // speakers that matched the same saved profile) for speakers.json.
-        let mut final_centroid_sums: HashMap<String, (Vec<f32>, usize)> = HashMap::new();
-        for (label, (sum, count)) in &local_centroid_sums {
-            if let Some(final_name) = name_map.get(label) {
-                let entry = final_centroid_sums
-                    .entry(final_name.clone())
-                    .or_insert_with(|| (vec![0.0f32; sum.len()], 0));
-                if entry.0.len() == sum.len() {
-                    for (acc, v) in entry.0.iter_mut().zip(sum.iter()) {
-                        *acc += v;
-                    }
-                    entry.1 += count;
-                }
-            }
-        }
-        final_centroids = Some(
-            final_centroid_sums
-                .into_iter()
-                .map(|(label, (sum, count))| {
-                    let centroid = average_normalized_centroid(&sum, count);
-                    (label, centroid, count)
-                })
-                .collect(),
-        );
+        final_centroids = Some(crate::diarization::batch::merge_centroids_by_final_label(
+            &local_embeddings,
+            &name_map,
+        ));
     } else {
         // Existing VAD-per-segment path — unchanged when diarization is
         // disabled or the sidecar produced no usable turns.
