@@ -17,7 +17,7 @@
 - **`speakrs` dependency:** `speakrs = { version = "0.5", features = ["coreml", <one BLAS feature>] }` — in `diarize-helper/Cargo.toml` ONLY. Apache-2.0.
 - **Audio interchange:** raw little-endian `f32` samples, mono, **16 kHz** (no WAV container — the app already holds `Vec<f32>` 16 kHz mono; the sidecar reads raw f32 LE). speakrs `run()` takes `&[f32]`.
 - **Commits:** gitmoji conventional; **NO `Co-Authored-By`, NO AI/agent mention** anywhere in commit messages. Local `main` only; do NOT push during implementation.
-- **Run all main-app cargo from `frontend/src-tauri`; run sidecar cargo from the repo root** (`cargo build -p diarize-helper`). It is a Cargo workspace. Pre-existing failing tests `audio::device_detection::{test_builtin_mic_detection, test_calculate_buffer_timeout_bluetooth}` are NOT yours — ignore them.
+- **`diarize-helper` is an INDEPENDENT nested workspace, NOT a root-workspace member** (Task 1 discovered this: speakrs needs `ort ^2.0.0-rc.12`, the main app pins `ort 2.0.0-rc.10` directly + transitively via `silero_rs`, and one workspace resolves one `ort` — mutually exclusive). Its `Cargo.toml` has its own `[workspace]` table and its own `Cargo.lock`; the root `Cargo.toml` `members` is UNCHANGED. **Build the sidecar with `cd diarize-helper && cargo build --release`** (NOT `-p diarize-helper` from root); its binary lands at `diarize-helper/target/release/diarize-helper` (gitignored by the root `target/` rule). Run all main-app cargo from `frontend/src-tauri`. Pre-existing failing tests `audio::device_detection::{test_builtin_mic_detection, test_calculate_buffer_timeout_bluetooth}` are NOT yours — ignore them.
 
 ---
 
@@ -196,11 +196,11 @@ Read the surrounding block (the `cargo build ... -p llama-helper` and the `cp ..
 
 ```bash
 echo "🗣️  Building diarize-helper sidecar (release)..."
-( cd "$ROOT_DIR" && cargo build -p diarize-helper --release )   # use the same root-dir var the script already uses
-cp "$ROOT_DIR/target/release/diarize-helper" "./src-tauri/binaries/diarize-helper-${TARGET_TRIPLE}"
+( cd "$ROOT_DIR/diarize-helper" && cargo build --release )   # nested workspace — NOT `-p diarize-helper` from root
+cp "$ROOT_DIR/diarize-helper/target/release/diarize-helper" "./src-tauri/binaries/diarize-helper-${TARGET_TRIPLE}"
 echo "✅ Copied diarize-helper to ./src-tauri/binaries/diarize-helper-${TARGET_TRIPLE}"
 ```
-(Match the script's actual variable names — read them in Step 1; do not invent new ones.)
+(Match the script's actual root-dir variable name — read it in Step 1; do not invent new ones. NOTE: `diarize-helper` is its own nested workspace with its own `target/` — build INSIDE the crate dir; do not add it to the root workspace.)
 
 - [ ] **Step 3: Declare the sidecar in `tauri.conf.json`.** Find `bundle.externalBin` (which already lists the llama-helper sidecar) and add the diarize-helper entry alongside it:
 
