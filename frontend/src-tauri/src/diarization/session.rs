@@ -73,6 +73,25 @@ impl DiarizationSession {
         }
     }
 
+    /// Compute the raw L2-normalized CAM++ embedding for a 16kHz mono segment,
+    /// without touching the clusterer. Used by the batch/retranscription turn
+    /// path to build per-local-speaker centroids from the sidecar's turns
+    /// (clustering there is done via profile matching in `batch::map_local_speakers_to_profiles`
+    /// instead of the online clusterer). None if the segment is too short or
+    /// extraction fails — callers should simply skip that unit's embedding.
+    pub fn embed(&mut self, samples_16k: &[f32]) -> Option<Vec<f32>> {
+        if !has_enough_samples_for_embedding(samples_16k.len()) {
+            return None;
+        }
+        match self.extractor.compute(samples_16k) {
+            Ok(embedding) => Some(embedding),
+            Err(e) => {
+                log::warn!("Diarization embedding failed for batch unit: {}", e);
+                None
+            }
+        }
+    }
+
     pub fn clusterer(&self) -> &SpeakerClusterer {
         &self.clusterer
     }

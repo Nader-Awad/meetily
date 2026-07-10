@@ -212,6 +212,19 @@ pub(crate) fn split_segment_at_silence(
     result
 }
 
+/// Slice 16 kHz mono samples for a [start_ms, end_ms) window (clamped).
+/// Used by the diarization turn path to cut a single-speaker unit out of the
+/// full decoded buffer for per-unit transcription/embedding.
+pub(crate) fn slice_samples_16k(samples: &[f32], start_ms: u64, end_ms: u64) -> Vec<f32> {
+    let sr = 16_000u64;
+    let start = ((start_ms * sr) / 1000) as usize;
+    let end = (((end_ms * sr) / 1000) as usize).min(samples.len());
+    if start >= end {
+        return Vec::new();
+    }
+    samples[start..end].to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

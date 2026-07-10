@@ -239,8 +239,20 @@ pub async fn persist_speaker_centroids(
     session: &super::DiarizationSession,
     folder: Option<std::path::PathBuf>,
 ) {
-    let snapshot = session.centroid_snapshot();
-    if snapshot.is_empty() {
+    persist_labeled_centroids(folder, &session.centroid_snapshot()).await;
+}
+
+/// Persist an explicit set of (label, centroid, unit count) speaker centroids
+/// to speakers.json in the meeting folder. Used by the turn-based (sidecar)
+/// batch diarization path, which maps local speakers to final profile-backed
+/// labels itself rather than through a `DiarizationSession`'s online
+/// clusterer. Same JSON shape as `persist_speaker_centroids` so rename /
+/// "remember voice" (`load_centroid_from_folder`) reads it identically.
+pub async fn persist_labeled_centroids(
+    folder: Option<std::path::PathBuf>,
+    centroids: &[(String, Vec<f32>, usize)],
+) {
+    if centroids.is_empty() {
         return;
     }
     let folder = match folder {
@@ -252,13 +264,13 @@ pub async fn persist_speaker_centroids(
     };
     let json = serde_json::json!({
         "version": "1.0",
-        "speakers": snapshot.iter().map(|(label, centroid, count)| {
+        "speakers": centroids.iter().map(|(label, centroid, count)| {
             serde_json::json!({ "label": label, "centroid": centroid, "segments": count })
         }).collect::<Vec<_>>(),
     });
     let path = folder.join("speakers.json");
     match serde_json::to_string(&json).map(|s| std::fs::write(&path, s)) {
-        Ok(Ok(())) => log::info!("🎙️ Saved {} speaker centroid(s) to {}", snapshot.len(), path.display()),
+        Ok(Ok(())) => log::info!("🎙️ Saved {} speaker centroid(s) to {}", centroids.len(), path.display()),
         Ok(Err(e)) => log::warn!("🎙️ Failed to write speakers.json: {}", e),
         Err(e) => log::warn!("🎙️ Failed to serialize speaker centroids: {}", e),
     }
