@@ -6,6 +6,7 @@
 // diarization slice of upstream PR #538 (author: rodrigopg), trimmed of the
 // overlap/timeline machinery. See docs in each module.
 
+pub mod batch;
 pub mod clustering;
 pub mod commands;
 pub mod embedding;
