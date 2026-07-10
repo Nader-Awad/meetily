@@ -178,7 +178,7 @@ async fn reattribute_matching_clusters(
         return;
     }
 
-    let mut merged = 0usize;
+    let mut succeeded: Vec<String> = Vec::new();
     for hit in &hits {
         match sqlx::query("UPDATE transcripts SET speaker = ? WHERE meeting_id = ? AND speaker = ?")
             .bind(new_name)
@@ -187,7 +187,7 @@ async fn reattribute_matching_clusters(
             .execute(pool)
             .await
         {
-            Ok(_) => merged += 1,
+            Ok(_) => succeeded.push(hit.clone()),
             Err(e) => log::warn!(
                 "🎙️ Failed to re-attribute cluster '{}' in meeting {}: {}",
                 hit,
@@ -197,11 +197,14 @@ async fn reattribute_matching_clusters(
         }
     }
 
-    if merged > 0 {
+    // Only relabel in speakers.json the clusters whose DB update actually
+    // succeeded - relabeling a hit whose UPDATE failed would desync
+    // speakers.json (renamed) from transcripts (still under the old label).
+    if !succeeded.is_empty() {
         let relabeled: Vec<(String, Vec<f32>)> = all_centroids
             .into_iter()
             .map(|(label, centroid)| {
-                if label == named_label || hits.contains(&label) {
+                if label == named_label || succeeded.contains(&label) {
                     (new_name.to_string(), centroid)
                 } else {
                     (label, centroid)
@@ -224,7 +227,7 @@ async fn reattribute_matching_clusters(
 
     log::info!(
         "🎙️ Re-attributed {} cluster(s) to '{}' in meeting {}",
-        merged,
+        succeeded.len(),
         new_name,
         meeting_id
     );
