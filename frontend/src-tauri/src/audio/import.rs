@@ -4,12 +4,14 @@ use crate::api::TranscriptSegment;
 use crate::audio::decoder::{decode_audio_file, decode_audio_file_with_progress};
 use crate::audio::vad::get_speech_chunks_with_progress;
 use crate::config::{DEFAULT_WHISPER_MODEL, DEFAULT_PARAKEET_MODEL};
+use crate::database::repositories::speaker_profile::SpeakerProfilesRepository;
 use crate::parakeet_engine::ParakeetEngine;
 use crate::state::AppState;
 use crate::whisper_engine::WhisperEngine;
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -18,7 +20,7 @@ use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 use super::audio_processing::create_meeting_folder;
-use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json};
+use super::common::{create_transcript_segments, slice_samples_16k, split_segment_at_silence, write_transcripts_json};
 use super::constants::AUDIO_EXTENSIONS;
 use super::recording_preferences::get_default_recordings_folder;
 
@@ -430,8 +432,11 @@ async fn run_import<R: Runtime>(
     // Use VAD to find speech segments
     let app_for_vad = app.clone();
 
-    let speech_segments = tokio::task::spawn_blocking(move || {
-        get_speech_chunks_with_progress(
+    // Run VAD on the full buffer, then hand the buffer back alongside the
+    // result — the diarization turn path below needs the same 16kHz mono
+    // samples VAD just consumed, and this avoids an extra multi-minute clone.
+    let (audio_samples, vad_result) = tokio::task::spawn_blocking(move || {
+        let result = get_speech_chunks_with_progress(
             &audio_samples,
             VAD_REDEMPTION_TIME_MS,
             |vad_progress, segments_found| {
@@ -447,11 +452,12 @@ async fn run_import<R: Runtime>(
                 );
                 !IMPORT_CANCELLED.load(Ordering::SeqCst)
             },
-        )
+        );
+        (audio_samples, result)
     })
     .await
-    .map_err(|e| anyhow!("VAD task panicked: {}", e))?
-    .map_err(|e| anyhow!("VAD processing failed: {}", e))?;
+    .map_err(|e| anyhow!("VAD task panicked: {}", e))?;
+    let speech_segments = vad_result.map_err(|e| anyhow!("VAD processing failed: {}", e))?;
 
     let total_segments = speech_segments.len();
     info!("VAD detected {} speech segments (redemption_time={}ms)", total_segments, VAD_REDEMPTION_TIME_MS);
@@ -551,67 +557,236 @@ async fn run_import<R: Runtime>(
     // Best-effort speaker diarization: None unless the feature is enabled + model present.
     let mut diarization = crate::diarization::commands::init_session(&app).await;
 
-    for (i, segment) in processable_segments.iter().enumerate() {
-        if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-            let _ = std::fs::remove_dir_all(&meeting_folder);
-            return Err(anyhow!("Import cancelled"));
-        }
+    // Neural speaker turns via the diarize-helper sidecar (best-effort).
+    // `audio_samples` is the full 16 kHz mono buffer used for VAD above.
+    // Also gated on total_segments > 0, since that's what determines whether
+    // an engine was actually loaded below — without it, the turn path's
+    // `.unwrap()` on the engine would panic.
+    let diar_units: Option<Vec<crate::diarization::batch::DiarUnit>> = if diarization.is_some() && total_segments > 0 {
+        crate::diarization::run_segmenter(&app, &audio_samples)
+            .await
+            .map(|turns| {
+                crate::diarization::batch::merge_turns(
+                    &turns,
+                    crate::diarization::batch::MIN_UNIT_MS,
+                    crate::diarization::batch::MERGE_GAP_MS,
+                )
+            })
+            .filter(|units| !units.is_empty())
+    } else {
+        None
+    };
 
-        let progress = 30 + ((i as f32 / processable_count.max(1) as f32) * 50.0) as u32;
-        let segment_duration_sec = (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
-        emit_progress(
-            &app,
-            "transcribing",
-            progress,
-            &format!(
-                "Transcribing segment {} of {} ({:.1}s)...",
-                i + 1,
-                processable_count,
-                segment_duration_sec
-            ),
-        );
+    // Centroids to persist under FINAL (profile-mapped) labels when the turn
+    // path runs below; stays None for the VAD path, which persists via the
+    // session's own clusters instead (see the `persist_speaker_centroids` call).
+    let mut final_centroids: Option<Vec<(String, Vec<f32>, usize)>> = None;
 
-        // Skip very short segments
-        if segment.samples.len() < 1600 {
-            debug!(
-                "Skipping short segment {} with {} samples",
-                i,
-                segment.samples.len()
+    if let Some(units) = diar_units {
+        // Turn-based path: transcribe per single-speaker unit from the
+        // sidecar instead of VAD segment boundaries, and build per-local-
+        // speaker centroids from CAM++ embeddings for profile mapping.
+        let units_count = units.len();
+        let mut local_embeddings: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
+        // `map_local_speakers_to_profiles` numbers unmatched speakers "Speaker N"
+        // by first appearance; HashMap iteration order is random, so track
+        // first-appearance order separately instead of relying on it.
+        let mut local_speaker_order: Vec<String> = Vec::new();
+
+        for (i, unit) in units.iter().enumerate() {
+            if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+                let _ = std::fs::remove_dir_all(&meeting_folder);
+                return Err(anyhow!("Import cancelled"));
+            }
+
+            let progress = 30 + ((i as f32 / units_count.max(1) as f32) * 50.0) as u32;
+            let unit_duration_sec = (unit.end_ms - unit.start_ms) as f64 / 1000.0;
+            emit_progress(
+                &app,
+                "transcribing",
+                progress,
+                &format!(
+                    "Transcribing speaker turn {} of {} ({:.1}s)...",
+                    i + 1,
+                    units_count,
+                    unit_duration_sec
+                ),
             );
-            continue;
-        }
 
-        // Transcribe
-        let (text, conf) = if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
-            let text = engine
-                .transcribe_audio(segment.samples.clone())
-                .await
-                .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
-        } else {
-            let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, _) = engine
-                .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
-                .await
-                .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            (text, conf)
-        };
+            let unit_samples = slice_samples_16k(&audio_samples, unit.start_ms, unit.end_ms);
 
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
+            // Skip very short units (< 100ms of audio = 1600 samples at 16kHz)
+            if unit_samples.len() < 1600 {
+                debug!("Skipping short diarization unit {} with {} samples", i, unit_samples.len());
+                continue;
+            }
+
+            // Transcribe this unit with the same engine call the VAD path uses.
+            // Best-effort: a transcription failure skips the unit rather than
+            // aborting the whole import.
+            let (text, conf) = if use_parakeet {
+                let engine = parakeet_engine.as_ref().unwrap();
+                match engine.transcribe_audio(unit_samples.clone()).await {
+                    Ok(text) => (text, 0.9f32),
+                    Err(e) => {
+                        warn!("Parakeet transcription failed on diarization unit {}: {}", i, e);
+                        continue;
+                    }
+                }
+            } else {
+                let engine = whisper_engine.as_ref().unwrap();
+                match engine
+                    .transcribe_audio_with_confidence(unit_samples.clone(), language.clone())
+                    .await
+                {
+                    Ok((text, conf, _)) => (text, conf),
+                    Err(e) => {
+                        warn!("Whisper transcription failed on diarization unit {}: {}", i, e);
+                        continue;
+                    }
+                }
+            };
+
+            // Skip empty transcripts
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                debug!("Diarization unit {}/{}: {:.1}s — empty transcription", i + 1, units_count, unit_duration_sec);
+                continue;
+            }
             debug!(
-                "Segment {}/{}: {:.1}s, conf={:.2}, text='{}'",
-                i + 1, processable_count, segment_duration_sec, conf,
+                "Diarization unit {}/{}: {:.1}s, speaker={}, conf={:.2}, text='{}'",
+                i + 1, units_count, unit_duration_sec, unit.speaker_local, conf,
                 if trimmed.len() > 80 { let mut end = 80; while !trimmed.is_char_boundary(end) { end -= 1; } &trimmed[..end] } else { trimmed }
             );
-            let speaker = diarization
-                .as_mut()
-                .and_then(|s| s.label_segment(&segment.samples));
-            all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms, speaker));
+
+            // Accumulate raw embeddings per local speaker label. Best-effort:
+            // a too-short/failed embedding just means this unit doesn't
+            // contribute to the centroid — the transcript is kept regardless.
+            // Averaging + L2-normalizing happens below, via the shared
+            // `diarization::batch` helper (mismatched-dimension embeddings
+            // are dropped there rather than at accumulation time).
+            if let Some(session) = diarization.as_mut() {
+                if let Some(embedding) = session.embed(&unit_samples) {
+                    if !local_embeddings.contains_key(&unit.speaker_local) {
+                        local_speaker_order.push(unit.speaker_local.clone());
+                    }
+                    local_embeddings
+                        .entry(unit.speaker_local.clone())
+                        .or_default()
+                        .push(embedding);
+                }
+            }
+
+            all_transcripts.push((text, unit.start_ms as f64, unit.end_ms as f64, Some(unit.speaker_local.clone())));
             total_confidence += conf;
-        } else {
-            debug!("Segment {}/{}: {:.1}s — empty transcription", i + 1, processable_count, segment_duration_sec);
+        }
+
+        // Average + L2-normalize each local speaker's accumulated embedding, in
+        // first-appearance order, then map local labels to saved voice profiles
+        // (or a stable "Speaker N").
+        let local_centroids: Vec<(String, Vec<f32>)> = local_speaker_order
+            .iter()
+            .filter_map(|label| {
+                local_embeddings.get(label).and_then(|embeddings| {
+                    crate::diarization::batch::average_normalized_centroid(embeddings)
+                        .map(|centroid| (label.clone(), centroid))
+                })
+            })
+            .collect();
+
+        // Best-effort profile lookup: missing app state or a DB error just
+        // means every local speaker falls back to an anonymous "Speaker N".
+        let profiles: Vec<(String, Vec<f32>)> = match app.try_state::<AppState>() {
+            Some(state) => SpeakerProfilesRepository::list(state.db_manager.pool())
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| (p.name, p.embedding))
+                .collect(),
+            None => Vec::new(),
+        };
+
+        let name_map = crate::diarization::batch::map_local_speakers_to_profiles(&local_centroids, &profiles);
+
+        for entry in all_transcripts.iter_mut() {
+            if let Some(local) = entry.3.clone() {
+                if let Some(final_name) = name_map.get(&local) {
+                    entry.3 = Some(final_name.clone());
+                }
+            }
+        }
+
+        // Re-key the accumulated centroids under final labels (merging local
+        // speakers that matched the same saved profile) for speakers.json.
+        final_centroids = Some(crate::diarization::batch::merge_centroids_by_final_label(
+            &local_embeddings,
+            &name_map,
+        ));
+    } else {
+        // Existing VAD-per-segment path — unchanged when diarization is
+        // disabled or the sidecar produced no usable turns.
+        for (i, segment) in processable_segments.iter().enumerate() {
+            if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+                let _ = std::fs::remove_dir_all(&meeting_folder);
+                return Err(anyhow!("Import cancelled"));
+            }
+
+            let progress = 30 + ((i as f32 / processable_count.max(1) as f32) * 50.0) as u32;
+            let segment_duration_sec = (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
+            emit_progress(
+                &app,
+                "transcribing",
+                progress,
+                &format!(
+                    "Transcribing segment {} of {} ({:.1}s)...",
+                    i + 1,
+                    processable_count,
+                    segment_duration_sec
+                ),
+            );
+
+            // Skip very short segments
+            if segment.samples.len() < 1600 {
+                debug!(
+                    "Skipping short segment {} with {} samples",
+                    i,
+                    segment.samples.len()
+                );
+                continue;
+            }
+
+            // Transcribe
+            let (text, conf) = if use_parakeet {
+                let engine = parakeet_engine.as_ref().unwrap();
+                let text = engine
+                    .transcribe_audio(segment.samples.clone())
+                    .await
+                    .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
+                (text, 0.9f32)
+            } else {
+                let engine = whisper_engine.as_ref().unwrap();
+                let (text, conf, _) = engine
+                    .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
+                    .await
+                    .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
+                (text, conf)
+            };
+
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                debug!(
+                    "Segment {}/{}: {:.1}s, conf={:.2}, text='{}'",
+                    i + 1, processable_count, segment_duration_sec, conf,
+                    if trimmed.len() > 80 { let mut end = 80; while !trimmed.is_char_boundary(end) { end -= 1; } &trimmed[..end] } else { trimmed }
+                );
+                let speaker = diarization
+                    .as_mut()
+                    .and_then(|s| s.label_segment(&segment.samples));
+                all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms, speaker));
+                total_confidence += conf;
+            } else {
+                debug!("Segment {}/{}: {:.1}s — empty transcription", i + 1, processable_count, segment_duration_sec);
+            }
         }
     }
 
@@ -658,7 +833,10 @@ async fn run_import<R: Runtime>(
         warn!("Failed to write transcripts.json: {}", e);
     }
 
-    if let Some(session) = diarization.as_ref() {
+    if let Some(centroids) = final_centroids {
+        // Turn path: persist under the FINAL (profile-mapped) labels.
+        crate::diarization::commands::persist_labeled_centroids(Some(meeting_folder.clone()), &centroids).await;
+    } else if let Some(session) = diarization.as_ref() {
         crate::diarization::commands::persist_speaker_centroids(session, Some(meeting_folder.clone())).await;
     }
 
