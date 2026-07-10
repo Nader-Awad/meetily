@@ -69,6 +69,20 @@ export function TranscriptPanel({
     }));
   }, [transcripts, usePagination, segments]);
 
+  // Already-assigned real speaker names in this meeting, offered as a picklist
+  // when renaming a different speaker (so the user can merge into an existing person).
+  const existingSpeakerNames = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          convertedSegments
+            .map((s) => (s.speaker ?? '').trim())
+            .filter((n) => n.length > 0 && !/^Speaker \d+$/.test(n))
+        )
+      ),
+    [convertedSegments]
+  );
+
   return (
     <div className="hidden md:flex md:w-1/4 lg:w-1/3 min-w-0 border-r border-gray-200 bg-white flex-col relative shrink-0">
       {/* Title area */}
@@ -119,6 +133,7 @@ export function TranscriptPanel({
         <SpeakerRenameDialog
           meetingId={meetingId}
           speakerLabel={renameSpeaker}
+          existingNames={existingSpeakerNames}
           onClose={() => setRenameSpeaker(null)}
           onRenamed={async () => {
             setRenameSpeaker(null);
