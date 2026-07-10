@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.5.4 — 2026-07-10
+
+- **Much better speaker separation on Retranscribe & Import.** Speaker labeling on the
+  batch paths no longer collapses a back-and-forth conversation into one speaker. When
+  speaker identification is enabled, an on-device neural diarizer (pyannote segmentation
+  via a bundled `speakrs` sidecar) detects real speaker turns, and each turn is
+  transcribed and labeled separately — so two people talking now show as distinct
+  speakers. Cross-meeting voice profiles ("Me" and named voices) still apply, and per-meeting
+  centroids are saved so rename + "remember this voice" works on retranscribed/imported
+  meetings. Fully local (audio never leaves your machine); the first run downloads the
+  segmentation models once. Best-effort: with the feature off or the sidecar unavailable,
+  Retranscribe/Import behave exactly as before. (Live recording is unchanged for now.)
+- **Rename cleans up over-splitting.** Naming a speaker now also re-checks the meeting's
+  other detected speakers and merges any that match that voice — so a person accidentally
+  split across two labels becomes one when you name them.
+
 ## v0.5.3 — 2026-07-10
 
 - **Retroactive speaker diarization.** Speaker identification now runs on the two
