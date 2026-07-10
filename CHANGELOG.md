@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.5.3 — 2026-07-10
+
+- **Retroactive speaker diarization.** Speaker identification now runs on the two
+  batch paths, not just live recordings: **Retranscribe** an existing meeting or
+  **Import** an audio file and — when speaker identification is enabled and its model
+  is downloaded — each segment is labeled (`Speaker N`, or a matched saved-profile name
+  like "Me"), and per-meeting voice centroids are saved so the rename + "remember this
+  voice" flow works on those meetings too. Meetings recorded before the feature existed
+  can now be labeled by simply retranscribing them. Fully best-effort: with the feature
+  off or the model absent, retranscribe/import behave exactly as before.
+
 ## v0.5.2 — 2026-07-09
 
 - **Selectable NeoHive connection auth.** Beyond the existing Cloudflare Access service
