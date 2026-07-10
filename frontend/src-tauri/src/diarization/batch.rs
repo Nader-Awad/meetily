@@ -4,12 +4,20 @@
 // batch (Retranscribe/Import) diarization path. No I/O, no model calls here —
 // callers supply CAM++ centroids; this module is fully unit-testable.
 
-use super::clustering::{cosine_similarity, PROFILE_MATCH_THRESHOLD};
+use super::clustering::cosine_similarity;
 use super::segmenter::DiarTurn;
 use std::collections::HashMap;
 
 pub const MIN_UNIT_MS: u64 = 1000;
 pub const MERGE_GAP_MS: u64 = 500;
+
+/// A cluster only adopts a saved profile's name when it is a CLEAR winner:
+/// nearest profile, cosine ≥ HIGH_MATCH_THRESHOLD, and ahead of the runner-up
+/// by ≥ MATCH_MARGIN. Otherwise the cluster stays "Speaker N" (unknown) — we
+/// never force a guess. Deliberately stricter than the intra-meeting
+/// clustering threshold; a weak/ambiguous match must read as unknown.
+pub const HIGH_MATCH_THRESHOLD: f32 = 0.72;
+pub const MATCH_MARGIN: f32 = 0.08;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiarUnit {
@@ -44,8 +52,10 @@ pub fn merge_turns(turns: &[DiarTurn], min_unit_ms: u64, merge_gap_ms: u64) -> V
         .collect()
 }
 
-/// Map each local speakrs speaker to a saved profile name (cosine ≥ threshold)
-/// or a stable "Speaker N" label (numbered by first appearance).
+/// Map each local speakrs speaker to a saved profile name, but only when the
+/// match is a clear, confident win (see `HIGH_MATCH_THRESHOLD`/`MATCH_MARGIN`).
+/// Otherwise falls back to a stable "Speaker N" label (numbered by first
+/// appearance).
 pub fn map_local_speakers_to_profiles(
     local_centroids: &[(String, Vec<f32>)],
     profiles: &[(String, Vec<f32>)],
@@ -53,13 +63,26 @@ pub fn map_local_speakers_to_profiles(
     let mut map = HashMap::new();
     let mut anon: usize = 0;
     for (local, centroid) in local_centroids {
-        let best = profiles
+        let mut sims: Vec<(&String, f32)> = profiles
             .iter()
             .map(|(name, emb)| (name, cosine_similarity(centroid, emb)))
-            .filter(|(_, sim)| *sim >= PROFILE_MATCH_THRESHOLD)
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        let label = match best {
-            Some((name, _)) => name.clone(),
+            .collect();
+        sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let confident = match sims.first() {
+            Some((name, best)) => {
+                let runner_up = sims.get(1).map(|(_, s)| *s).unwrap_or(0.0);
+                if *best >= HIGH_MATCH_THRESHOLD && (*best - runner_up) >= MATCH_MARGIN {
+                    Some((*name).clone())
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+
+        let label = match confident {
+            Some(name) => name,
             None => {
                 anon += 1;
                 format!("Speaker {}", anon)
@@ -185,6 +208,41 @@ mod tests {
         let map = map_local_speakers_to_profiles(&locals, &profiles);
         assert_eq!(map.get("A").map(String::as_str), Some("Alice"));
         assert_eq!(map.get("B").map(String::as_str), Some("Speaker 1"));
+    }
+
+    #[test]
+    fn ambiguous_match_is_unknown_speaker_n() {
+        // two profiles both close to the cluster, within the margin → not confident
+        let cluster = unit(vec![1.0, 1.0, 0.0]);
+        let profiles = vec![
+            ("Alice".to_string(), unit(vec![1.0, 0.9, 0.0])),
+            ("Bob".to_string(), unit(vec![0.9, 1.0, 0.0])),
+        ];
+        let map = map_local_speakers_to_profiles(&[("A".to_string(), cluster)], &profiles);
+        assert_eq!(map.get("A").map(String::as_str), Some("Speaker 1"));
+    }
+
+    #[test]
+    fn weak_best_below_high_threshold_is_unknown() {
+        // best match is ~0.64 cosine — above the OLD 0.60 bar (would have mislabeled),
+        // below HIGH_MATCH_THRESHOLD → must stay "Speaker 1", not "Alice".
+        let cluster = unit(vec![1.0, 1.2, 0.0]);
+        let profiles = vec![("Alice".to_string(), unit(vec![1.0, 0.0, 0.0]))];
+        let sim = crate::diarization::clustering::cosine_similarity(
+            &unit(vec![1.0, 1.2, 0.0]),
+            &unit(vec![1.0, 0.0, 0.0]),
+        );
+        assert!(sim > 0.60 && sim < HIGH_MATCH_THRESHOLD, "test fixture sim={sim}");
+        let map = map_local_speakers_to_profiles(&[("A".to_string(), cluster)], &profiles);
+        assert_eq!(map.get("A").map(String::as_str), Some("Speaker 1"));
+    }
+
+    #[test]
+    fn single_strong_profile_matches() {
+        let cluster = unit(vec![1.0, 0.02, 0.0]);
+        let profiles = vec![("Alice".to_string(), unit(vec![1.0, 0.0, 0.0]))];
+        let map = map_local_speakers_to_profiles(&[("A".to_string(), cluster)], &profiles);
+        assert_eq!(map.get("A").map(String::as_str), Some("Alice"));
     }
 
     #[test]
