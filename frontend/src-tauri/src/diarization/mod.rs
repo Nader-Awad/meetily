@@ -11,6 +11,8 @@ pub mod commands;
 pub mod embedding;
 pub mod fbank;
 pub mod models;
+pub mod segmenter;
 pub mod session;
 
+pub use segmenter::{run_segmenter, DiarTurn};
 pub use session::DiarizationSession;
