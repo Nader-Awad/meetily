@@ -297,8 +297,8 @@ Expected: compile error — `parse_turns_json` / `DiarTurn` not found.
 
 use serde::Deserialize;
 use std::io::Write;
+use std::path::PathBuf;
 use tauri::{AppHandle, Manager, Runtime};
-use tauri_plugin_shell::ShellExt;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiarTurn {
@@ -355,21 +355,29 @@ pub async fn run_segmenter<R: Runtime>(
         }
     }
 
-    // Spawn the bundled sidecar (mirrors how llama-helper is resolved via the shell plugin).
-    let result = (|| async {
-        let cmd = app
-            .shell()
-            .sidecar("diarize-helper")
-            .ok()?
-            .args([
-                "--samples",
-                tmp.to_str()?,
-                "--models-dir",
-                models_dir.to_str()?,
-            ]);
-        cmd.output().await.ok()
-    })()
-    .await;
+    // Resolve + spawn the bundled diarize-helper sidecar as a ONE-SHOT process.
+    // This codebase does NOT use tauri-plugin-shell; llama-helper is spawned via
+    // plain tokio::process::Command on a resolved binary path. Mirror
+    // `SidecarManager::resolve_helper_binary` in
+    // frontend/src-tauri/src/summary/summary_engine/sidecar.rs (~lines 108-210):
+    // it locates `llama-helper-<target-triple>` next to `std::env::current_exe()`
+    // and under `RESOURCE_DIR`. Copy that resolution, substituting "diarize-helper".
+    let bin = match resolve_sidecar_binary() {
+        Some(b) => b,
+        None => {
+            log::warn!("🗣️ diarization: diarize-helper sidecar binary not found");
+            let _ = std::fs::remove_file(&tmp);
+            return None;
+        }
+    };
+    let result = tokio::process::Command::new(&bin)
+        .arg("--samples")
+        .arg(&tmp)
+        .arg("--models-dir")
+        .arg(&models_dir)
+        .output()
+        .await
+        .ok();
 
     let _ = std::fs::remove_file(&tmp);
 
@@ -391,7 +399,7 @@ pub async fn run_segmenter<R: Runtime>(
 }
 ```
 
-> NOTE: `app.shell().sidecar("diarize-helper")` is the Tauri v2 shell-plugin sidecar API — confirm the exact call by reading how `llama-helper` is spawned in the main app (`grep -rn "sidecar\|\.shell()" frontend/src-tauri/src/summary/`). If llama-helper uses a different resolution (e.g. a resolved binary path + `std::process::Command`), MIRROR that exact mechanism instead; keep the `Option` return + None-on-failure contract.
+> NOTE — `resolve_sidecar_binary()` is NOT written above; you must add it. This codebase has NO `tauri-plugin-shell` and NO `capabilities/` dir — `externalBin` is only a bundling/validation mechanism. Read `frontend/src-tauri/src/summary/summary_engine/sidecar.rs` `fn resolve_helper_binary()` (~lines 108-210) and copy its resolution logic into a `fn resolve_sidecar_binary() -> Option<PathBuf>` in `segmenter.rs`, substituting the binary name `diarize-helper` for `llama-helper` (it searches next to `std::env::current_exe()` and under `RESOURCE_DIR` for `<name>-<target-triple>`; return `Option`, not `Result`, so a miss degrades to `None`). Spawn with plain `tokio::process::Command` as shown (one-shot `.output().await`, NOT the persistent stdin/stdout SidecarManager loop). Keep the `Option`/None-on-failure contract throughout — no `unwrap`/`expect`/`?` that could panic.
 
 - [ ] **Step 4: Export from `mod.rs`.** Add:
 
