@@ -212,6 +212,29 @@ pub(crate) fn split_segment_at_silence(
     result
 }
 
+/// Split a diarization turn-unit's samples into transcribable sub-pieces.
+/// Units at or under `max_samples` come back as a single sub-piece with the
+/// unit's original bounds (via `split_segment_at_silence`'s own short-circuit);
+/// longer ones — a multi-minute single-speaker monologue — are split at
+/// silence boundaries so they don't become one giant transcription call.
+/// Callers should still embed the full `unit_samples` once for the speaker
+/// centroid *before* calling this, since it consumes the buffer; only the
+/// transcription unit changes here, not the speaker attribution.
+pub(crate) fn split_unit_for_transcription(
+    unit_samples: Vec<f32>,
+    start_ms: u64,
+    end_ms: u64,
+    max_samples: usize,
+) -> Vec<crate::audio::vad::SpeechSegment> {
+    let segment = crate::audio::vad::SpeechSegment {
+        samples: unit_samples,
+        start_timestamp_ms: start_ms as f64,
+        end_timestamp_ms: end_ms as f64,
+        confidence: 1.0,
+    };
+    split_segment_at_silence(&segment, max_samples)
+}
+
 /// Slice 16 kHz mono samples for a [start_ms, end_ms) window (clamped).
 /// Used by the diarization turn path to cut a single-speaker unit out of the
 /// full decoded buffer for per-unit transcription/embedding.

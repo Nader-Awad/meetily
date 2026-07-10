@@ -20,7 +20,7 @@ use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 use super::audio_processing::create_meeting_folder;
-use super::common::{create_transcript_segments, slice_samples_16k, split_segment_at_silence, write_transcripts_json};
+use super::common::{create_transcript_segments, slice_samples_16k, split_segment_at_silence, split_unit_for_transcription, write_transcripts_json};
 use super::constants::AUDIO_EXTENSIONS;
 use super::recording_preferences::get_default_recordings_folder;
 
@@ -621,50 +621,15 @@ async fn run_import<R: Runtime>(
                 continue;
             }
 
-            // Transcribe this unit with the same engine call the VAD path uses.
-            // Best-effort: a transcription failure skips the unit rather than
-            // aborting the whole import.
-            let (text, conf) = if use_parakeet {
-                let engine = parakeet_engine.as_ref().unwrap();
-                match engine.transcribe_audio(unit_samples.clone()).await {
-                    Ok(text) => (text, 0.9f32),
-                    Err(e) => {
-                        warn!("Parakeet transcription failed on diarization unit {}: {}", i, e);
-                        continue;
-                    }
-                }
-            } else {
-                let engine = whisper_engine.as_ref().unwrap();
-                match engine
-                    .transcribe_audio_with_confidence(unit_samples.clone(), language.clone())
-                    .await
-                {
-                    Ok((text, conf, _)) => (text, conf),
-                    Err(e) => {
-                        warn!("Whisper transcription failed on diarization unit {}: {}", i, e);
-                        continue;
-                    }
-                }
-            };
-
-            // Skip empty transcripts
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                debug!("Diarization unit {}/{}: {:.1}s — empty transcription", i + 1, units_count, unit_duration_sec);
-                continue;
-            }
-            debug!(
-                "Diarization unit {}/{}: {:.1}s, speaker={}, conf={:.2}, text='{}'",
-                i + 1, units_count, unit_duration_sec, unit.speaker_local, conf,
-                if trimmed.len() > 80 { let mut end = 80; while !trimmed.is_char_boundary(end) { end -= 1; } &trimmed[..end] } else { trimmed }
-            );
-
             // Accumulate raw embeddings per local speaker label. Best-effort:
             // a too-short/failed embedding just means this unit doesn't
             // contribute to the centroid — the transcript is kept regardless.
             // Averaging + L2-normalizing happens below, via the shared
             // `diarization::batch` helper (mismatched-dimension embeddings
             // are dropped there rather than at accumulation time).
+            // IMPORTANT: embed the FULL unit once, before splitting for
+            // transcription below — the centroid is per speaker turn, not
+            // per transcription sub-piece.
             if let Some(session) = diarization.as_mut() {
                 if let Some(embedding) = session.embed(&unit_samples) {
                     if !local_embeddings.contains_key(&unit.speaker_local) {
@@ -677,8 +642,60 @@ async fn run_import<R: Runtime>(
                 }
             }
 
-            all_transcripts.push((text, unit.start_ms as f64, unit.end_ms as f64, Some(unit.speaker_local.clone())));
-            total_confidence += conf;
+            // Long single-speaker units get split at silence boundaries before
+            // transcription (same 25s cap as the VAD path above) so a
+            // multi-minute monologue doesn't become one giant transcription
+            // call. Units at or under the cap come back as a single sub-piece
+            // with the unit's original bounds — same as today.
+            let sub_pieces = split_unit_for_transcription(
+                unit_samples,
+                unit.start_ms,
+                unit.end_ms,
+                MAX_SEGMENT_SAMPLES,
+            );
+
+            for sub in &sub_pieces {
+                // Transcribe this piece with the same engine call the VAD path
+                // uses. Best-effort: a transcription failure skips the piece
+                // rather than aborting the whole import.
+                let (text, conf) = if use_parakeet {
+                    let engine = parakeet_engine.as_ref().unwrap();
+                    match engine.transcribe_audio(sub.samples.clone()).await {
+                        Ok(text) => (text, 0.9f32),
+                        Err(e) => {
+                            warn!("Parakeet transcription failed on diarization unit {}: {}", i, e);
+                            continue;
+                        }
+                    }
+                } else {
+                    let engine = whisper_engine.as_ref().unwrap();
+                    match engine
+                        .transcribe_audio_with_confidence(sub.samples.clone(), language.clone())
+                        .await
+                    {
+                        Ok((text, conf, _)) => (text, conf),
+                        Err(e) => {
+                            warn!("Whisper transcription failed on diarization unit {}: {}", i, e);
+                            continue;
+                        }
+                    }
+                };
+
+                // Skip empty transcripts
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    debug!("Diarization unit {}/{}: {:.1}s — empty transcription", i + 1, units_count, unit_duration_sec);
+                    continue;
+                }
+                debug!(
+                    "Diarization unit {}/{}: {:.1}s, speaker={}, conf={:.2}, text='{}'",
+                    i + 1, units_count, unit_duration_sec, unit.speaker_local, conf,
+                    if trimmed.len() > 80 { let mut end = 80; while !trimmed.is_char_boundary(end) { end -= 1; } &trimmed[..end] } else { trimmed }
+                );
+
+                all_transcripts.push((text, sub.start_timestamp_ms as f64, sub.end_timestamp_ms as f64, Some(unit.speaker_local.clone())));
+                total_confidence += conf;
+            }
         }
 
         // Average + L2-normalize each local speaker's accumulated embedding, in

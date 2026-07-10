@@ -17,7 +17,14 @@
 use serde::Deserialize;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Manager, Runtime};
+
+/// Monotonic counter mixed into the temp samples filename below. The pid
+/// alone (`std::process::id()`) is constant for the whole process, so two
+/// concurrent sidecar calls in the same run (e.g. a retranscribe racing an
+/// import) would otherwise collide on the same temp path.
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiarTurn {
@@ -145,15 +152,18 @@ fn resolve_sidecar_binary() -> Option<PathBuf> {
         log::warn!("🗣️ RESOURCE_DIR environment variable not set");
     }
 
-    // 4. Fallback for dev: try relative paths from workspace (no target triple in dev builds)
+    // 4. Fallback for dev: try relative paths from workspace (no target triple in dev builds).
+    // `diarize-helper` is its own nested workspace (has its own `[workspace]` in
+    // diarize-helper/Cargo.toml), so it builds to
+    // `<repo>/diarize-helper/target/{release,debug}/`, not `<repo>/target/...`.
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let project_root = PathBuf::from(&manifest_dir).parent()?.parent()?.to_path_buf();
 
         let candidates = [
-            project_root.join("target/release/diarize-helper"),
-            project_root.join("target/debug/diarize-helper"),
-            project_root.join("target/release/diarize-helper.exe"),
-            project_root.join("target/debug/diarize-helper.exe"),
+            project_root.join("diarize-helper/target/release/diarize-helper"),
+            project_root.join("diarize-helper/target/debug/diarize-helper"),
+            project_root.join("diarize-helper/target/release/diarize-helper.exe"),
+            project_root.join("diarize-helper/target/debug/diarize-helper.exe"),
         ];
 
         for candidate in candidates {
@@ -177,8 +187,21 @@ pub async fn run_segmenter<R: Runtime>(
     }
     let models_dir = speakrs_models_dir(app)?;
 
-    // Write raw f32 LE samples to a temp file.
-    let tmp = std::env::temp_dir().join(format!("meetily_diar_{}.f32", std::process::id()));
+    // Write raw f32 LE samples to a temp file. Mix a counter and a timestamp
+    // into the name alongside the pid — the pid is constant per process, so
+    // it alone can't disambiguate two concurrent calls (e.g. retranscribe +
+    // import racing) within the same run.
+    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!(
+        "meetily_diar_{}_{}_{}.f32",
+        std::process::id(),
+        nanos,
+        counter
+    ));
     {
         let mut f = match std::fs::File::create(&tmp) {
             Ok(f) => f,
