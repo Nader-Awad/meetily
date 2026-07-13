@@ -4,7 +4,7 @@
 // (persisted in the diarization_settings table), model status, and
 // model download.
 
-use crate::database::repositories::speaker_profile::SpeakerProfilesRepository;
+use crate::database::repositories::speaker_profile::{accrue_centroid, SpeakerProfilesRepository};
 use crate::state::AppState;
 use sqlx::SqlitePool;
 use tauri::{command, AppHandle, Manager, Runtime};
@@ -56,6 +56,11 @@ pub async fn diarization_set_enabled(
 pub async fn diarization_download_model<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     super::models::download_embedding_model(&app).await
 }
+
+/// Weight given to an existing saved profile's centroid when accruing a newly
+/// confirmed cluster centroid into it (segment count isn't tracked per-profile,
+/// so we use a fixed weight that favors stability over a single meeting's noise).
+const PROFILE_ACCRUAL_WEIGHT: usize = 8;
 
 /// Read the centroid for a speaker label from a meeting folder's speakers.json.
 fn load_centroid_from_folder(folder: &str, label: &str) -> Option<Vec<f32>> {
@@ -120,11 +125,26 @@ pub async fn diarization_rename_speaker(
             .as_deref()
             .and_then(|f| load_centroid_from_folder(f, &old_label))
         {
-            SpeakerProfilesRepository::create(pool, new_name, &centroid)
+            let profiles = SpeakerProfilesRepository::list(pool)
                 .await
-                .map_err(|e| format!("Failed to save voice profile: {}", e))?;
+                .map_err(|e| format!("Failed to load voice profiles: {}", e))?;
+            let existing = profiles.into_iter().find(|p| p.name == new_name);
+
+            if let Some(existing) = existing {
+                // Already have a profile for this name - accrue into it instead
+                // of inserting a duplicate row.
+                let accrued = accrue_centroid(&existing.embedding, PROFILE_ACCRUAL_WEIGHT, &centroid);
+                SpeakerProfilesRepository::update_embedding(pool, &existing.id, &accrued)
+                    .await
+                    .map_err(|e| format!("Failed to update voice profile: {}", e))?;
+                log::info!("Strengthened voice profile '{}' from meeting {}", new_name, meeting_id);
+            } else {
+                SpeakerProfilesRepository::create(pool, new_name, &centroid)
+                    .await
+                    .map_err(|e| format!("Failed to save voice profile: {}", e))?;
+                log::info!("Saved voice profile '{}' from meeting {}", new_name, meeting_id);
+            }
             profile_saved = true;
-            log::info!("Saved voice profile '{}' from meeting {}", new_name, meeting_id);
         } else {
             log::warn!(
                 "No voice centroid found for '{}' in meeting {} - profile not saved",
