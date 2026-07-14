@@ -350,6 +350,7 @@ mod tests {
             provider: "openrouter".into(), model: "x/y".into(),
             max_tokens: None, temperature: None, top_p: None,
             neohive_export: Some(NeoHiveExportConfig::default()),
+            obsidian_export: None,
         };
         let wf = WorkflowsRepository::upsert_workflow(&pool, &input).await.unwrap();
         assert_eq!(WorkflowsRepository::list_workflows(&pool).await.unwrap().len(), 1);

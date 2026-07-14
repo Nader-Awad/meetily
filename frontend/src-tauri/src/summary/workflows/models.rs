@@ -37,6 +37,30 @@ impl Default for NeoHiveExportConfig {
     }
 }
 
+/// Per-workflow config for writing a completed run to an Obsidian vault folder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObsidianExportConfig {
+    /// Whether this workflow may write to Obsidian at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// If true, write automatically when a run completes; else manual button only.
+    #[serde(default)]
+    pub auto_export: bool,
+    /// Optional relative subfolder under the configured vault path (e.g. "Meeting Notes").
+    #[serde(default)]
+    pub subfolder: Option<String>,
+    /// Extra frontmatter tags added on top of the defaults ["meeting", "meetily"].
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+impl Default for ObsidianExportConfig {
+    fn default() -> Self {
+        Self { enabled: false, auto_export: false, subfolder: None, tags: Vec::new() }
+    }
+}
+
 /// A saved workflow recipe (DB row). DB columns are snake_case; JSON to the
 /// frontend is camelCase.
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
@@ -54,6 +78,8 @@ pub struct Workflow {
     pub top_p: Option<f64>,
     /// Raw JSON string of NeoHiveExportConfig; parse with `neohive_config()`.
     pub neohive_export: Option<String>,
+    /// Raw JSON string of ObsidianExportConfig; parse with `obsidian_config()`.
+    pub obsidian_export: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -62,6 +88,14 @@ impl Workflow {
     /// Parses the stored export config, falling back to a disabled default.
     pub fn neohive_config(&self) -> NeoHiveExportConfig {
         self.neohive_export
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Parses the stored Obsidian export config, falling back to a disabled default.
+    pub fn obsidian_config(&self) -> ObsidianExportConfig {
+        self.obsidian_export
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default()
@@ -84,6 +118,7 @@ pub struct WorkflowInput {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub neohive_export: Option<NeoHiveExportConfig>,
+    pub obsidian_export: Option<ObsidianExportConfig>,
 }
 
 /// A workflow run (DB row / poll target).
@@ -100,6 +135,8 @@ pub struct WorkflowRun {
     pub result_sections: Option<String>,
     pub error: Option<String>,
     pub neohive_status: String,
+    pub obsidian_status: String,
+    pub obsidian_path: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }

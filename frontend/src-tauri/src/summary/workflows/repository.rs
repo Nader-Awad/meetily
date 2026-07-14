@@ -30,13 +30,20 @@ impl WorkflowsRepository {
             ),
             None => None,
         };
+        let obsidian_json = match &input.obsidian_export {
+            Some(cfg) => Some(
+                serde_json::to_string(cfg)
+                    .map_err(|e| sqlx::Error::Protocol(format!("serialize obsidian cfg: {}", e).into()))?,
+            ),
+            None => None,
+        };
 
         sqlx::query(
             r#"
             INSERT INTO workflows
                 (id, name, description, template_id, custom_prompt, provider, model,
-                 max_tokens, temperature, top_p, neohive_export, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 max_tokens, temperature, top_p, neohive_export, obsidian_export, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -48,6 +55,7 @@ impl WorkflowsRepository {
                 temperature = excluded.temperature,
                 top_p = excluded.top_p,
                 neohive_export = excluded.neohive_export,
+                obsidian_export = excluded.obsidian_export,
                 updated_at = excluded.updated_at
             "#,
         )
@@ -62,6 +70,7 @@ impl WorkflowsRepository {
         .bind(input.temperature)
         .bind(input.top_p)
         .bind(&export_json)
+        .bind(&obsidian_json)
         .bind(now)
         .bind(now)
         .execute(pool)
@@ -181,6 +190,23 @@ impl WorkflowsRepository {
             .await?;
         Ok(())
     }
+
+    pub async fn set_run_obsidian_result(
+        pool: &SqlitePool,
+        run_id: &str,
+        status: &str,
+        path: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        let now = chrono::Utc::now();
+        sqlx::query("UPDATE workflow_runs SET obsidian_status = ?, obsidian_path = ?, updated_at = ? WHERE id = ?")
+            .bind(status)
+            .bind(path)
+            .bind(now)
+            .bind(run_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +241,7 @@ mod tests {
             temperature: Some(0.4),
             top_p: None,
             neohive_export: Some(NeoHiveExportConfig::default()),
+            obsidian_export: None,
         }
     }
 
@@ -288,5 +315,30 @@ mod tests {
         // exercise the real cascade-delete path (meeting.rs::delete_meeting_with_transaction)
         assert!(MeetingsRepository::delete_meeting(&pool, "m1").await.unwrap());
         assert!(WorkflowsRepository::get_run(&pool, "r1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn obsidian_export_roundtrips_and_run_defaults_none() {
+        let pool = test_pool().await;
+        let mut input = sample_input("Obsidian");
+        input.obsidian_export = Some(crate::summary::workflows::models::ObsidianExportConfig {
+            enabled: true, auto_export: true, subfolder: Some("Meeting Notes".into()), tags: vec!["x".into()],
+        });
+        let wf = WorkflowsRepository::upsert_workflow(&pool, &input).await.unwrap();
+        let cfg = wf.obsidian_config();
+        assert!(cfg.enabled && cfg.auto_export);
+        assert_eq!(cfg.subfolder.as_deref(), Some("Meeting Notes"));
+
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('m1','T','t','t')")
+            .execute(&pool).await.unwrap();
+        WorkflowsRepository::create_run(&pool, "r1", Some(&wf.id), &wf.name, "m1").await.unwrap();
+        let run = WorkflowsRepository::get_run(&pool, "r1").await.unwrap().unwrap();
+        assert_eq!(run.obsidian_status, "none");
+        assert!(run.obsidian_path.is_none());
+
+        WorkflowsRepository::set_run_obsidian_result(&pool, "r1", "saved", Some("/tmp/x.md")).await.unwrap();
+        let run = WorkflowsRepository::get_run(&pool, "r1").await.unwrap().unwrap();
+        assert_eq!(run.obsidian_status, "saved");
+        assert_eq!(run.obsidian_path.as_deref(), Some("/tmp/x.md"));
     }
 }
