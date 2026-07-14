@@ -85,6 +85,106 @@ fn load_centroid_from_folder(folder: &str, label: &str) -> Option<Vec<f32>> {
     })
 }
 
+/// Relabel `old_label` → `new_name` across (label, centroid, segments) speaker
+/// entries, merging any that now share `new_name` into one: a segment-weighted
+/// mean centroid, re-normalized, with segments summed. The merged entry keeps
+/// the first occurrence's position. Pure (no I/O) so it is unit-tested.
+pub(crate) fn relabel_and_merge_centroids(
+    speakers: Vec<(String, Vec<f32>, usize)>,
+    old_label: &str,
+    new_name: &str,
+) -> Vec<(String, Vec<f32>, usize)> {
+    let mut out: Vec<(String, Vec<f32>, usize)> = Vec::new();
+    let mut merged_idx: Option<usize> = None;
+    for (label, centroid, segments) in speakers {
+        let label = if label == old_label { new_name.to_string() } else { label };
+        if label == new_name {
+            match merged_idx {
+                None => {
+                    merged_idx = Some(out.len());
+                    out.push((label, centroid, segments));
+                }
+                Some(i) => {
+                    let existing = &mut out[i];
+                    let w0 = existing.2.max(1) as f32;
+                    let w1 = segments.max(1) as f32;
+                    if existing.1.len() == centroid.len() {
+                        for (a, b) in existing.1.iter_mut().zip(centroid.iter()) {
+                            *a = (*a * w0 + *b * w1) / (w0 + w1);
+                        }
+                        let norm = existing.1.iter().map(|v| v * v).sum::<f32>().sqrt();
+                        if norm > 0.0 {
+                            for v in existing.1.iter_mut() {
+                                *v /= norm;
+                            }
+                        }
+                    }
+                    existing.2 += segments;
+                }
+            }
+        } else {
+            out.push((label, centroid, segments));
+        }
+    }
+    out
+}
+
+/// Best-effort: keep speakers.json labels in lockstep with a rename by
+/// relabeling `old_label` → `new_name` (merging duplicates via
+/// `relabel_and_merge_centroids`). No-op if the file is missing/unparseable or
+/// `old_label` is not present — never fails the rename.
+fn relabel_speaker_in_folder(folder: &str, old_label: &str, new_name: &str) {
+    let path = std::path::Path::new(folder).join("speakers.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(j) => j,
+        Err(_) => return,
+    };
+    let arr = match json.get("speakers").and_then(|s| s.as_array()) {
+        Some(a) => a,
+        None => return,
+    };
+    let speakers: Vec<(String, Vec<f32>, usize)> = arr
+        .iter()
+        .filter_map(|s| {
+            let label = s.get("label")?.as_str()?.to_string();
+            let centroid: Vec<f32> = s
+                .get("centroid")?
+                .as_array()?
+                .iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect();
+            let segments = s.get("segments").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            if centroid.is_empty() {
+                None
+            } else {
+                Some((label, centroid, segments))
+            }
+        })
+        .collect();
+    if !speakers.iter().any(|(l, _, _)| l == old_label) {
+        return; // nothing to relabel
+    }
+    let relabeled = relabel_and_merge_centroids(speakers, old_label, new_name);
+    let out = serde_json::json!({
+        "version": "1.0",
+        "speakers": relabeled.into_iter().map(|(label, centroid, segments)| {
+            serde_json::json!({ "label": label, "centroid": centroid, "segments": segments })
+        }).collect::<Vec<_>>(),
+    });
+    match serde_json::to_string(&out).map(|s| std::fs::write(&path, s)) {
+        Ok(Ok(())) => log::info!(
+            "🎙️ Relabeled speakers.json '{}' → '{}' in {}",
+            old_label, new_name, folder
+        ),
+        Ok(Err(e)) => log::warn!("🎙️ Failed to write speakers.json after relabel: {}", e),
+        Err(e) => log::warn!("🎙️ Failed to serialize speakers.json after relabel: {}", e),
+    }
+}
+
 /// Rename a speaker across all segments of a meeting. Optionally saves the
 /// speaker's voice centroid (from the meeting's speakers.json) as a persistent
 /// profile so future recordings label this voice by name automatically.
@@ -111,16 +211,15 @@ pub async fn diarization_rename_speaker(
         .map_err(|e| format!("Failed to rename speaker: {}", e))?;
     let updated = result.rows_affected();
 
+    let folder_path: Option<String> = sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+        .bind(&meeting_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to look up meeting folder: {}", e))?
+        .flatten();
+
     let mut profile_saved = false;
     if save_profile {
-        let folder_path: Option<String> =
-            sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
-                .bind(&meeting_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| format!("Failed to look up meeting folder: {}", e))?
-                .flatten();
-
         if let Some(centroid) = folder_path
             .as_deref()
             .and_then(|f| load_centroid_from_folder(f, &old_label))
@@ -152,6 +251,12 @@ pub async fn diarization_rename_speaker(
                 meeting_id
             );
         }
+    }
+
+    // Keep speakers.json labels in lockstep with the transcript so a later
+    // re-attribution can still find this voice under its current name.
+    if let Some(folder) = folder_path.as_deref() {
+        relabel_speaker_in_folder(folder, &old_label, new_name);
     }
 
     Ok(serde_json::json!({
@@ -293,5 +398,50 @@ pub async fn persist_labeled_centroids(
         Ok(Ok(())) => log::info!("🎙️ Saved {} speaker centroid(s) to {}", centroids.len(), path.display()),
         Ok(Err(e)) => log::warn!("🎙️ Failed to write speakers.json: {}", e),
         Err(e) => log::warn!("🎙️ Failed to serialize speaker centroids: {}", e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unit(v: Vec<f32>) -> Vec<f32> {
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        v.into_iter().map(|x| x / n).collect()
+    }
+
+    #[test]
+    fn relabel_simple_no_collision() {
+        let speakers = vec![
+            ("Speaker 1".to_string(), unit(vec![1.0, 0.0, 0.0]), 3),
+            ("Speaker 2".to_string(), unit(vec![0.0, 1.0, 0.0]), 5),
+        ];
+        let out = relabel_and_merge_centroids(speakers, "Speaker 2", "Bob");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, "Speaker 1");
+        assert_eq!(out[1].0, "Bob");
+        assert_eq!(out[1].2, 5); // segments preserved
+    }
+
+    #[test]
+    fn relabel_merges_on_name_collision() {
+        // "Speaker 2" is renamed to "Bob", but a "Bob" already exists → merge into one.
+        let speakers = vec![
+            ("Bob".to_string(), unit(vec![1.0, 0.0, 0.0]), 4),
+            ("Speaker 2".to_string(), unit(vec![1.0, 0.2, 0.0]), 2),
+        ];
+        let out = relabel_and_merge_centroids(speakers, "Speaker 2", "Bob");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "Bob");
+        assert_eq!(out[0].2, 6); // 4 + 2 segments summed
+        let norm = out[0].1.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4, "merged centroid must be unit-norm, got {norm}");
+    }
+
+    #[test]
+    fn relabel_absent_old_label_is_unchanged() {
+        let speakers = vec![("Speaker 1".to_string(), unit(vec![1.0, 0.0, 0.0]), 3)];
+        let out = relabel_and_merge_centroids(speakers.clone(), "Nope", "Bob");
+        assert_eq!(out, speakers);
     }
 }
