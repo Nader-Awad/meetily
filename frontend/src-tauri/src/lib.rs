@@ -688,6 +688,7 @@ pub fn run() {
             diarization::commands::diarization_list_profiles,
             diarization::commands::diarization_rename_profile,
             diarization::commands::diarization_delete_profile,
+            diarization::commands::diarization_get_suggestions,
             summary::workflows::commands::api_export_run_to_neohive,
             summary::workflows::commands::api_get_neohive_config,
             summary::workflows::commands::api_save_neohive_config,

@@ -581,6 +581,10 @@ async fn run_import<R: Runtime>(
     // path runs below; stays None for the VAD path, which persists via the
     // session's own clusters instead (see the `persist_speaker_centroids` call).
     let mut final_centroids: Option<Vec<(String, Vec<f32>, usize)>> = None;
+    // Near-match suggestions for unmatched "Speaker N" clusters, keyed by
+    // final label; passed through to speakers.json alongside final_centroids.
+    let mut final_suggestions: std::collections::HashMap<String, (String, f32)> =
+        std::collections::HashMap::new();
 
     if let Some(units) = diar_units {
         // Turn-based path: transcribe per single-speaker unit from the
@@ -739,6 +743,7 @@ async fn run_import<R: Runtime>(
             &local_embeddings,
             &name_map,
         ));
+        final_suggestions = crate::diarization::batch::suggest_near_matches(&local_centroids, &profiles, &name_map);
     } else {
         // Existing VAD-per-segment path — unchanged when diarization is
         // disabled or the sidecar produced no usable turns.
@@ -852,7 +857,7 @@ async fn run_import<R: Runtime>(
 
     if let Some(centroids) = final_centroids {
         // Turn path: persist under the FINAL (profile-mapped) labels.
-        crate::diarization::commands::persist_labeled_centroids(Some(meeting_folder.clone()), &centroids).await;
+        crate::diarization::commands::persist_labeled_centroids(Some(meeting_folder.clone()), &centroids, &final_suggestions).await;
     } else if let Some(session) = diarization.as_ref() {
         crate::diarization::commands::persist_speaker_centroids(session, Some(meeting_folder.clone())).await;
     }

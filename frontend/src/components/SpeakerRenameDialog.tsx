@@ -25,6 +25,7 @@ interface SpeakerRenameDialogProps {
   meetingId: string;
   speakerLabel: string;
   existingNames?: string[];
+  suggestedName?: string;
   onClose: () => void;
   onRenamed: () => void | Promise<void>;
 }
@@ -38,15 +39,17 @@ export function SpeakerRenameDialog({
   meetingId,
   speakerLabel,
   existingNames,
+  suggestedName,
   onClose,
   onRenamed,
 }: SpeakerRenameDialogProps) {
-  const [name, setName] = useState('');
+  const [name, setName] = useState(suggestedName ?? '');
   const [saveProfile, setSaveProfile] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   // Whether the current name came from clicking a picklist chip (explicit
   // "same person") vs being typed. Only typed collisions get the confirm.
-  const [pickedFromList, setPickedFromList] = useState(false);
+  // A suggested name is likewise an explicit pick (confirming a known voice).
+  const [pickedFromList, setPickedFromList] = useState(!!suggestedName);
   // When set, the typed name collides with an existing person and we show a
   // confirmation instead of renaming. Holds the CANONICAL existing name.
   const [pendingDuplicate, setPendingDuplicate] = useState<string | null>(null);
@@ -121,6 +124,9 @@ export function SpeakerRenameDialog({
           <DialogDescription>
             The new name is applied to every segment from this speaker in this meeting.
           </DialogDescription>
+          {suggestedName && (
+            <p className="text-xs text-gray-500">Suggested from a saved voice.</p>
+          )}
         </DialogHeader>
 
         {pendingDuplicate ? (

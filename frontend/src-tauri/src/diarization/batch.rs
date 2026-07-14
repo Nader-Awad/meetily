@@ -157,6 +157,50 @@ pub fn merge_centroids_by_final_label(
         .collect()
 }
 
+/// Near-match suggestion band floor. A cluster that did NOT confidently match
+/// (below HIGH_MATCH_THRESHOLD) but whose best profile cosine is at least this,
+/// and clearly ahead of the runner-up, is surfaced as a confirmable suggestion
+/// rather than a silent "Speaker N". Never auto-applied.
+pub const SUGGEST_FLOOR: f32 = 0.62;
+
+/// For each cluster whose final label is still an unnamed "Speaker N" (i.e. it
+/// did not confidently match a profile in `name_map`), return the best
+/// near-match suggestion (SUGGEST_FLOOR ≤ cosine < HIGH_MATCH_THRESHOLD, clear
+/// top candidate by ≥ MATCH_MARGIN), keyed by the cluster's FINAL label. Pure.
+pub fn suggest_near_matches(
+    local_centroids: &[(String, Vec<f32>)],
+    profiles: &[(String, Vec<f32>)],
+    name_map: &HashMap<String, String>,
+) -> HashMap<String, (String, f32)> {
+    let mut out = HashMap::new();
+    for (local, centroid) in local_centroids {
+        let final_label = match name_map.get(local) {
+            Some(l) => l,
+            None => continue,
+        };
+        // Skip clusters that confidently matched a profile (their final label IS
+        // a profile name); only unmatched "Speaker N" clusters get a suggestion.
+        if profiles.iter().any(|(n, _)| n == final_label) {
+            continue;
+        }
+        let mut sims: Vec<(&String, f32)> = profiles
+            .iter()
+            .map(|(name, emb)| (name, cosine_similarity(centroid, emb)))
+            .collect();
+        sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some((name, best)) = sims.first() {
+            let runner_up = sims.get(1).map(|(_, s)| *s).unwrap_or(0.0);
+            if *best >= SUGGEST_FLOOR
+                && *best < HIGH_MATCH_THRESHOLD
+                && (*best - runner_up) >= MATCH_MARGIN
+            {
+                out.insert(final_label.clone(), ((*name).clone(), *best));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +352,50 @@ mod tests {
         let merged = merge_centroids_by_final_label(&local_embeddings, &name_map);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].0, "Alice");
+    }
+
+    #[test]
+    fn suggests_near_match_for_unmatched_cluster() {
+        // best ~0.66 (in [0.62, 0.72)), clear top → suggestion.
+        let cluster = unit(vec![1.0, 1.1, 0.0]); // cos to [1,0,0] ~ 0.67
+        let profiles = vec![("Alice".to_string(), unit(vec![1.0, 0.0, 0.0]))];
+        let mut name_map = std::collections::HashMap::new();
+        name_map.insert("A".to_string(), "Speaker 1".to_string()); // unmatched
+        let out = suggest_near_matches(&[("A".to_string(), cluster)], &profiles, &name_map);
+        let s = out.get("Speaker 1").expect("should suggest");
+        assert_eq!(s.0, "Alice");
+        assert!(s.1 >= SUGGEST_FLOOR && s.1 < HIGH_MATCH_THRESHOLD, "score {}", s.1);
+    }
+
+    #[test]
+    fn no_suggestion_for_confidently_matched_cluster() {
+        // name_map already resolved to the profile name → not a "Speaker N" → skip.
+        let cluster = unit(vec![1.0, 0.02, 0.0]);
+        let profiles = vec![("Alice".to_string(), unit(vec![1.0, 0.0, 0.0]))];
+        let mut name_map = std::collections::HashMap::new();
+        name_map.insert("A".to_string(), "Alice".to_string());
+        let out = suggest_near_matches(&[("A".to_string(), cluster)], &profiles, &name_map);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn no_suggestion_below_floor() {
+        let cluster = unit(vec![1.0, 2.0, 0.0]); // cos to [1,0,0] ~ 0.447 < 0.62
+        let profiles = vec![("Alice".to_string(), unit(vec![1.0, 0.0, 0.0]))];
+        let mut name_map = std::collections::HashMap::new();
+        name_map.insert("A".to_string(), "Speaker 1".to_string());
+        assert!(suggest_near_matches(&[("A".to_string(), cluster)], &profiles, &name_map).is_empty());
+    }
+
+    #[test]
+    fn no_suggestion_when_ambiguous() {
+        let cluster = unit(vec![1.0, 1.0, 0.0]);
+        let profiles = vec![
+            ("Alice".to_string(), unit(vec![1.0, 0.9, 0.0])),
+            ("Bob".to_string(), unit(vec![0.9, 1.0, 0.0])),
+        ];
+        let mut name_map = std::collections::HashMap::new();
+        name_map.insert("A".to_string(), "Speaker 1".to_string());
+        assert!(suggest_near_matches(&[("A".to_string(), cluster)], &profiles, &name_map).is_empty());
     }
 }
