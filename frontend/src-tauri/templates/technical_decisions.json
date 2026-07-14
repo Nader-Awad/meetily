@@ -1,0 +1,17 @@
+{
+  "name": "Technical Decisions",
+  "description": "Extracts the technical and engineering decisions made in the meeting, with rationale, alternatives, and owners.",
+  "sections": [
+    {
+      "title": "Technical Decisions",
+      "instruction": "List every technical or engineering decision made in this meeting (architecture, tooling, libraries, APIs, data models, infrastructure, or engineering process). For each decision state what was decided, why, what alternatives were considered, and who owns it. Only include decisions that are genuinely technical; ignore purely organizational or scheduling decisions.",
+      "format": "list",
+      "item_format": "| **Decision** | Rationale | Alternatives Considered | Owner |\n| --- | --- | --- | --- |"
+    },
+    {
+      "title": "Open Technical Questions",
+      "instruction": "List technical questions that were raised but not resolved during the meeting, with enough context to answer them later.",
+      "format": "list"
+    }
+  ]
+}

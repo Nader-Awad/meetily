@@ -1,0 +1,32 @@
+{
+  "name": "Comprehensive Meeting Note",
+  "description": "A full, well-structured meeting note suitable for archiving to Obsidian.",
+  "sections": [
+    {
+      "title": "Overview",
+      "instruction": "Provide a concise executive overview of the meeting: its purpose, who was involved, and the overall outcome.",
+      "format": "paragraph"
+    },
+    {
+      "title": "Discussion & Key Topics",
+      "instruction": "Summarize the main topics discussed, including key arguments, context, and insights, organized topic by topic.",
+      "format": "paragraph"
+    },
+    {
+      "title": "Key Decisions",
+      "instruction": "List the important decisions made during the meeting, each with brief rationale.",
+      "format": "list"
+    },
+    {
+      "title": "Action Items",
+      "instruction": "List assigned tasks with their owner and due date.",
+      "format": "list",
+      "item_format": "| **Owner** | Task | Due |\n| --- | --- | --- |"
+    },
+    {
+      "title": "Open Questions / Follow-ups",
+      "instruction": "List unresolved questions and follow-ups from the meeting.",
+      "format": "list"
+    }
+  ]
+}
