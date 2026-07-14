@@ -1,3 +1,35 @@
+# Speaker-Rename UX (v0.5.7) Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** In the speaker rename dialog, default "Remember this voice" ON, and confirm before renaming to a name that already exists (typed collision) so the wrong voice profile isn't silently reinforced.
+
+**Architecture:** Frontend-only change to `SpeakerRenameDialog.tsx`. Add two bits of state (`pickedFromList`, `pendingDuplicate`); the Rename action guards TYPED names against a case-insensitive collision with existing people and shows an in-dialog confirmation; "use existing" sends the canonical name (reuses the backend accrue-on-name-match), "different person" returns to editing. No backend change.
+
+**Tech Stack:** Next.js/React + TypeScript, Tauri `invoke`.
+
+## Global Constraints
+
+- Frontend-only — modify ONLY `frontend/src/components/SpeakerRenameDialog.tsx`. No backend/Rust change, no new dependency.
+- The confirm fires only for TYPED names, NOT picklist selections (a chip click is an explicit "same person").
+- Collision detection is case-insensitive; "use existing" sends the CANONICAL existing name.
+- Gate = `cd frontend && npx tsc --noEmit` with NO new errors (a pre-existing `bun:test` tsc error is unrelated; there is no frontend unit-test runner). `pnpm lint`/`next lint` is broken repo-wide — do not rely on it.
+- Gitmoji conventional commit; NO `Co-Authored-By` / NO AI-agent mention. Local `main` only; do not push during implementation.
+
+---
+
+### Task 1: Remember-by-default + typed-duplicate confirmation
+
+**Files:**
+- Modify: `frontend/src/components/SpeakerRenameDialog.tsx` (full replacement below)
+
+**Interfaces:**
+- Consumes: existing `diarization_list_profiles` command + `existingNames` prop (both already present). No new props, no signature change.
+- Produces: no exported-interface change; purely internal dialog behavior.
+
+- [ ] **Step 1: Replace the file with the version below.** This changes `saveProfile` default to `true`, adds `pickedFromList` + `pendingDuplicate` state, wires the pick-vs-type flag on the chips + input, and adds the confirmation view + collision guard. Everything else (candidates computation, toasts, layout) is unchanged.
+
+```tsx
 'use client';
 
 // Rename a detected speaker ("Speaker 1" → "Alice") across all segments of a
@@ -217,3 +249,25 @@ export function SpeakerRenameDialog({
     </Dialog>
   );
 }
+```
+
+- [ ] **Step 2: Type-check.**
+
+Run: `cd frontend && npx tsc --noEmit 2>&1 | tail -15`
+Expected: no NEW errors. (Only the known pre-existing `bun:test` module-resolution error in `tests/lib/blocknote-markdown.test.ts` may appear — that is not from this change.)
+
+- [ ] **Step 3: Commit.**
+
+```bash
+cd /Users/naderawad/PersonalProjects/meetily
+git add frontend/src/components/SpeakerRenameDialog.tsx
+git commit -m "feat(speakers): :sparkles: remember voice by default + confirm on duplicate name"
+```
+
+---
+
+## Self-review
+
+- **Spec coverage:** §3a (default ON) → `useState(true)`. §3b (pick-vs-type) → `pickedFromList` set on chip click / cleared on input change. §3c (typed-duplicate confirm) → `handleRename` collision guard + `pendingDuplicate` view + `doRename(pendingDuplicate)` sends canonical. §4 (empty candidates → no collision possible) → `candidates.find` over an empty list returns undefined → normal rename. ✓
+- **Placeholder scan:** none — the full file is provided. ✓
+- **Type consistency:** `doRename(finalName: string)`, `pendingDuplicate: string | null`, `pickedFromList: boolean` used consistently; `handleRename` is now sync (dispatches `void doRename(...)`), and both the Enter key and the Rename button call it — matches. ✓
