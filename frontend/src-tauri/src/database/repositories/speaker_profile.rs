@@ -33,6 +33,28 @@ pub fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Running-mean accrual of a saved profile centroid toward a newly-confirmed
+/// cluster centroid, then re-normalized. `prior_count` is how many segments the
+/// existing centroid already represents (weight of the old value).
+pub fn accrue_centroid(existing: &[f32], prior_count: usize, new: &[f32]) -> Vec<f32> {
+    if existing.len() != new.len() || existing.is_empty() {
+        return existing.to_vec();
+    }
+    let w = prior_count.max(1) as f32;
+    let mut out: Vec<f32> = existing
+        .iter()
+        .zip(new.iter())
+        .map(|(e, n)| (e * w + n) / (w + 1.0))
+        .collect();
+    let norm = out.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in &mut out {
+            *x /= norm;
+        }
+    }
+    out
+}
+
 pub struct SpeakerProfilesRepository;
 
 impl SpeakerProfilesRepository {
@@ -74,6 +96,20 @@ impl SpeakerProfilesRepository {
         Ok(id)
     }
 
+    pub async fn update_embedding(
+        pool: &SqlitePool,
+        id: &str,
+        embedding: &[f32],
+    ) -> Result<(), SqlxError> {
+        sqlx::query("UPDATE speaker_profiles SET embedding = ?, updated_at = ? WHERE id = ?")
+            .bind(embedding_to_blob(embedding))
+            .bind(Utc::now())
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn rename(pool: &SqlitePool, id: &str, name: &str) -> Result<(), SqlxError> {
         sqlx::query("UPDATE speaker_profiles SET name = ?, updated_at = ? WHERE id = ?")
             .bind(name)
@@ -103,5 +139,24 @@ mod tests {
         let blob = embedding_to_blob(&embedding);
         assert_eq!(blob.len(), 16);
         assert_eq!(blob_to_embedding(&blob), embedding);
+    }
+}
+
+#[cfg(test)]
+mod accrual_tests {
+    use super::*;
+    fn unit(v: Vec<f32>) -> Vec<f32> {
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        v.into_iter().map(|x| x / n).collect()
+    }
+    #[test]
+    fn accrue_moves_toward_new_and_stays_unit() {
+        let existing = unit(vec![1.0, 0.0, 0.0]);
+        let new = unit(vec![0.0, 1.0, 0.0]);
+        let out = accrue_centroid(&existing, 4, &new); // 4 prior segments
+        let norm = out.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4, "result must be unit-norm, got {norm}");
+        // moved toward `new` on axis 1 but still dominated by `existing` on axis 0
+        assert!(out[0] > out[1] && out[1] > 0.0);
     }
 }
