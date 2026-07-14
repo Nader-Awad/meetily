@@ -364,7 +364,7 @@ pub async fn persist_speaker_centroids(
     session: &super::DiarizationSession,
     folder: Option<std::path::PathBuf>,
 ) {
-    persist_labeled_centroids(folder, &session.centroid_snapshot()).await;
+    persist_labeled_centroids(folder, &session.centroid_snapshot(), &std::collections::HashMap::new()).await;
 }
 
 /// Persist an explicit set of (label, centroid, unit count) speaker centroids
@@ -373,9 +373,13 @@ pub async fn persist_speaker_centroids(
 /// labels itself rather than through a `DiarizationSession`'s online
 /// clusterer. Same JSON shape as `persist_speaker_centroids` so rename /
 /// "remember voice" (`load_centroid_from_folder`) reads it identically.
+/// `suggestions` carries any near-match (name, score) found for a label,
+/// stored alongside it as an optional `suggested` field for the frontend to
+/// surface as a one-tap confirmation.
 pub async fn persist_labeled_centroids(
     folder: Option<std::path::PathBuf>,
     centroids: &[(String, Vec<f32>, usize)],
+    suggestions: &std::collections::HashMap<String, (String, f32)>,
 ) {
     if centroids.is_empty() {
         return;
@@ -390,7 +394,11 @@ pub async fn persist_labeled_centroids(
     let json = serde_json::json!({
         "version": "1.0",
         "speakers": centroids.iter().map(|(label, centroid, count)| {
-            serde_json::json!({ "label": label, "centroid": centroid, "segments": count })
+            let mut entry = serde_json::json!({ "label": label, "centroid": centroid, "segments": count });
+            if let Some((name, score)) = suggestions.get(label) {
+                entry["suggested"] = serde_json::json!({ "name": name, "score": score });
+            }
+            entry
         }).collect::<Vec<_>>(),
     });
     let path = folder.join("speakers.json");
@@ -399,6 +407,56 @@ pub async fn persist_labeled_centroids(
         Ok(Err(e)) => log::warn!("🎙️ Failed to write speakers.json: {}", e),
         Err(e) => log::warn!("🎙️ Failed to serialize speaker centroids: {}", e),
     }
+}
+
+#[derive(serde::Serialize)]
+pub struct SuggestionDto {
+    pub name: String,
+    pub score: f32,
+}
+
+/// Best-effort: read per-cluster near-match suggestions from a meeting's
+/// speakers.json. Returns { label -> {name, score} } for entries that carry a
+/// `suggested` field. Empty map on any missing/unparseable data.
+#[command]
+pub async fn diarization_get_suggestions(
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<std::collections::HashMap<String, SuggestionDto>, String> {
+    let pool = state.db_manager.pool();
+    let folder_path: Option<String> = sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+        .bind(&meeting_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to look up meeting folder: {}", e))?
+        .flatten();
+    let mut out = std::collections::HashMap::new();
+    let folder = match folder_path {
+        Some(f) => f,
+        None => return Ok(out),
+    };
+    let path = std::path::Path::new(&folder).join("speakers.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Ok(out),
+    };
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(j) => j,
+        Err(_) => return Ok(out),
+    };
+    if let Some(arr) = json.get("speakers").and_then(|s| s.as_array()) {
+        for s in arr {
+            if let (Some(label), Some(sug)) = (s.get("label").and_then(|l| l.as_str()), s.get("suggested")) {
+                if let (Some(name), Some(score)) = (
+                    sug.get("name").and_then(|n| n.as_str()),
+                    sug.get("score").and_then(|v| v.as_f64()),
+                ) {
+                    out.insert(label.to_string(), SuggestionDto { name: name.to_string(), score: score as f32 });
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

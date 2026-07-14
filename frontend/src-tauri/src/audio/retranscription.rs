@@ -672,7 +672,7 @@ async fn run_retranscription<R: Runtime>(
 
     if let Some(centroids) = final_centroids {
         // Turn path: persist under the FINAL (profile-mapped) labels.
-        crate::diarization::commands::persist_labeled_centroids(Some(folder_path.clone()), &centroids).await;
+        crate::diarization::commands::persist_labeled_centroids(Some(folder_path.clone()), &centroids, &std::collections::HashMap::new()).await;
     } else if let Some(session) = diarization.as_ref() {
         crate::diarization::commands::persist_speaker_centroids(session, Some(folder_path.clone())).await;
     }

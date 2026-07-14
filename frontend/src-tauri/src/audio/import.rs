@@ -852,7 +852,7 @@ async fn run_import<R: Runtime>(
 
     if let Some(centroids) = final_centroids {
         // Turn path: persist under the FINAL (profile-mapped) labels.
-        crate::diarization::commands::persist_labeled_centroids(Some(meeting_folder.clone()), &centroids).await;
+        crate::diarization::commands::persist_labeled_centroids(Some(meeting_folder.clone()), &centroids, &std::collections::HashMap::new()).await;
     } else if let Some(session) = diarization.as_ref() {
         crate::diarization::commands::persist_speaker_centroids(session, Some(meeting_folder.clone())).await;
     }
