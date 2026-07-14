@@ -37,6 +37,8 @@ export interface VirtualizedTranscriptViewProps {
 
     /** Called when a speaker chip is clicked (saved-meeting view only; live view is display-only) */
     onSpeakerClick?: (label: string) => void;
+    /** Near-match voice suggestions keyed by unnamed speaker label (e.g. "Speaker 2" -> Alice, 0.7) */
+    suggestions?: Record<string, { name: string; score: number }>;
 }
 
 // Threshold for enabling virtualization (below this, use simple rendering)
@@ -52,6 +54,11 @@ function speakerChipColor(label: string): string {
     let hash = 0;
     for (let i = 0; i < label.length; i++) hash = (hash * 31 + label.charCodeAt(i)) | 0;
     return palette[Math.abs(hash) % palette.length];
+}
+
+// An unnamed, auto-generated speaker label (not yet renamed to a real name).
+function isUnnamedSpeaker(label: string): boolean {
+    return /^Speaker \d+$/.test(label);
 }
 
 // Helper function to format seconds as recording-relative time [MM:SS]
@@ -85,6 +92,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     text,
     confidence,
     speaker,
+    suggestion,
     isStreaming,
     showConfidence,
     onSpeakerClick,
@@ -94,6 +102,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
     text: string;
     confidence?: number;
     speaker?: string;
+    suggestion?: { name: string; score: number };
     isStreaming: boolean;
     showConfidence: boolean;
     onSpeakerClick?: (label: string) => void;
@@ -106,6 +115,7 @@ const TranscriptSegment = memo(function TranscriptSegment({
             className={`inline-block mr-2 px-1.5 py-0.5 rounded text-xs font-medium ${speakerChipColor(speaker)}${onSpeakerClick ? ' cursor-pointer hover:opacity-80' : ''}`}
         >
             {speaker}
+            {suggestion && <span className="font-normal text-gray-400"> · {suggestion.name}?</span>}
         </span>
     );
 
@@ -153,6 +163,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     loadedCount = 0,
     onLoadMore,
     onSpeakerClick,
+    suggestions,
 }) => {
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -324,6 +335,11 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
+                                        suggestion={
+                                            segment.speaker && isUnnamedSpeaker(segment.speaker)
+                                                ? suggestions?.[segment.speaker]
+                                                : undefined
+                                        }
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                         onSpeakerClick={onSpeakerClick}
@@ -382,6 +398,11 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         speaker={segment.speaker}
+                                        suggestion={
+                                            segment.speaker && isUnnamedSpeaker(segment.speaker)
+                                                ? suggestions?.[segment.speaker]
+                                                : undefined
+                                        }
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                         onSpeakerClick={onSpeakerClick}

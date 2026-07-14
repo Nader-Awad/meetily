@@ -5,7 +5,8 @@ import { TranscriptView } from '@/components/TranscriptView';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { SpeakerRenameDialog } from '@/components/SpeakerRenameDialog';
-import { useMemo, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -52,6 +53,28 @@ export function TranscriptPanel({
 }: TranscriptPanelProps) {
   // Which speaker label (if any) is being renamed via SpeakerRenameDialog.
   const [renameSpeaker, setRenameSpeaker] = useState<string | null>(null);
+
+  // Near-match voice suggestions for unnamed speakers, keyed by label (e.g. "Speaker 2").
+  // Best-effort: an empty/failed fetch just means no hints are shown.
+  const [suggestions, setSuggestions] = useState<Record<string, { name: string; score: number }>>({});
+  const fetchSuggestions = useCallback(async () => {
+    if (!meetingId) {
+      setSuggestions({});
+      return;
+    }
+    try {
+      const result = await invoke<Record<string, { name: string; score: number }>>(
+        'diarization_get_suggestions',
+        { meetingId }
+      );
+      setSuggestions(result);
+    } catch {
+      setSuggestions({});
+    }
+  }, [meetingId]);
+  useEffect(() => {
+    void fetchSuggestions();
+  }, [fetchSuggestions]);
 
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
@@ -114,6 +137,7 @@ export function TranscriptPanel({
           loadedCount={loadedCount}
           onLoadMore={onLoadMore}
           onSpeakerClick={meetingId ? (label) => setRenameSpeaker(label) : undefined}
+          suggestions={suggestions}
         />
       </div>
 
@@ -134,10 +158,12 @@ export function TranscriptPanel({
           meetingId={meetingId}
           speakerLabel={renameSpeaker}
           existingNames={existingSpeakerNames}
+          suggestedName={suggestions[renameSpeaker]?.name}
           onClose={() => setRenameSpeaker(null)}
           onRenamed={async () => {
             setRenameSpeaker(null);
             await onRefetchTranscripts?.();
+            await fetchSuggestions();
           }}
         />
       )}
