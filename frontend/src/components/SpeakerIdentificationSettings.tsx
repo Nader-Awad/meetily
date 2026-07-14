@@ -228,6 +228,13 @@ export function SpeakerIdentificationSettings() {
           </ul>
         </div>
       )}
+
+      {status.enabled && profiles.length === 0 && (
+        <p className="mt-4 text-xs text-gray-500">
+          No saved voices yet — name a speaker with "Remember this voice" on to build
+          cross-meeting recognition.
+        </p>
+      )}
     </div>
   );
 }
