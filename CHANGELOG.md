@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.5.9 — 2026-07-14
+
+- **Fix: summaries now know who said what.** The built-in summary was sending the LLM the
+  transcript without speaker labels, so summaries referred to "unnamed speaker." The
+  speaker names are now included in the transcript handed to the model (matching the
+  Workflows behavior), so summaries can attribute points and action items to the right people.
+
 ## v0.5.8 — 2026-07-14
 
 - **Fix: re-attributing a speaker no longer loses the voice.** Correcting a speaker you'd
