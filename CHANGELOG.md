@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.5.8 — 2026-07-14
+
+- **Fix: re-attributing a speaker no longer loses the voice.** Correcting a speaker you'd
+  already named (or the app had auto-named) used to warn "Voice data was not available for
+  this meeting" and skip saving the voice, because the meeting's stored voice data wasn't
+  kept in sync with the renamed labels. Renaming now updates that stored voice data in
+  lockstep, so corrections keep working and the voice is remembered. (Meetings you renamed
+  before this update stay as-is; a fresh retranscribe re-syncs them.)
+
 ## v0.5.7 — 2026-07-14
 
 - **"Remember this voice" is on by default.** When you name a speaker, the app now
