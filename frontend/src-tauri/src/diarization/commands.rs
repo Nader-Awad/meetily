@@ -132,7 +132,10 @@ pub(crate) fn relabel_and_merge_centroids(
 /// Best-effort: keep speakers.json labels in lockstep with a rename by
 /// relabeling `old_label` → `new_name` (merging duplicates via
 /// `relabel_and_merge_centroids`). No-op if the file is missing/unparseable or
-/// `old_label` is not present — never fails the rename.
+/// `old_label` is not present — never fails the rename. Preserves the
+/// `suggested` near-match hint on every surviving entry that isn't the one
+/// just renamed, so confirming one speaker's suggestion doesn't wipe the
+/// pending "Speaker N · Name?" hints on the others in the same meeting.
 fn relabel_speaker_in_folder(folder: &str, old_label: &str, new_name: &str) {
     let path = std::path::Path::new(folder).join("speakers.json");
     let content = match std::fs::read_to_string(&path) {
@@ -147,6 +150,7 @@ fn relabel_speaker_in_folder(folder: &str, old_label: &str, new_name: &str) {
         Some(a) => a,
         None => return,
     };
+    let mut suggestions: std::collections::HashMap<String, (String, f32)> = std::collections::HashMap::new();
     let speakers: Vec<(String, Vec<f32>, usize)> = arr
         .iter()
         .filter_map(|s| {
@@ -158,6 +162,14 @@ fn relabel_speaker_in_folder(folder: &str, old_label: &str, new_name: &str) {
                 .filter_map(|v| v.as_f64().map(|f| f as f32))
                 .collect();
             let segments = s.get("segments").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            if let Some(sug) = s.get("suggested") {
+                if let (Some(name), Some(score)) = (
+                    sug.get("name").and_then(|n| n.as_str()),
+                    sug.get("score").and_then(|v| v.as_f64()),
+                ) {
+                    suggestions.insert(label.clone(), (name.to_string(), score as f32));
+                }
+            }
             if centroid.is_empty() {
                 None
             } else {
@@ -172,7 +184,11 @@ fn relabel_speaker_in_folder(folder: &str, old_label: &str, new_name: &str) {
     let out = serde_json::json!({
         "version": "1.0",
         "speakers": relabeled.into_iter().map(|(label, centroid, segments)| {
-            serde_json::json!({ "label": label, "centroid": centroid, "segments": segments })
+            let mut entry = serde_json::json!({ "label": label, "centroid": centroid, "segments": segments });
+            if let Some((name, score)) = suggestions.get(&label) {
+                entry["suggested"] = serde_json::json!({ "name": name, "score": score });
+            }
+            entry
         }).collect::<Vec<_>>(),
     });
     match serde_json::to_string(&out).map(|s| std::fs::write(&path, s)) {
@@ -424,13 +440,15 @@ pub async fn diarization_get_suggestions(
     meeting_id: String,
 ) -> Result<std::collections::HashMap<String, SuggestionDto>, String> {
     let pool = state.db_manager.pool();
-    let folder_path: Option<String> = sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+    let mut out = std::collections::HashMap::new();
+    let folder_path: Option<String> = match sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
         .bind(&meeting_id)
         .fetch_optional(pool)
         .await
-        .map_err(|e| format!("Failed to look up meeting folder: {}", e))?
-        .flatten();
-    let mut out = std::collections::HashMap::new();
+    {
+        Ok(row) => row.flatten(),
+        Err(_) => return Ok(out),
+    };
     let folder = match folder_path {
         Some(f) => f,
         None => return Ok(out),
@@ -501,5 +519,47 @@ mod tests {
         let speakers = vec![("Speaker 1".to_string(), unit(vec![1.0, 0.0, 0.0]), 3)];
         let out = relabel_and_merge_centroids(speakers.clone(), "Nope", "Bob");
         assert_eq!(out, speakers);
+    }
+
+    #[test]
+    fn relabel_speaker_in_folder_preserves_other_suggestions() {
+        // Renaming "Speaker 2" must not wipe "Speaker 1"'s pending suggestion,
+        // and the renamed entry ("Bob") should lose its own since it's now named.
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let speakers_json = serde_json::json!({
+            "version": "1.0",
+            "speakers": [
+                {
+                    "label": "Speaker 1",
+                    "centroid": unit(vec![1.0, 0.0, 0.0]),
+                    "segments": 3,
+                    "suggested": { "name": "Alice", "score": 0.81 },
+                },
+                {
+                    "label": "Speaker 2",
+                    "centroid": unit(vec![0.0, 1.0, 0.0]),
+                    "segments": 5,
+                    "suggested": { "name": "Bob", "score": 0.77 },
+                },
+            ],
+        });
+        std::fs::write(dir.path().join("speakers.json"), speakers_json.to_string())
+            .expect("failed to write speakers.json");
+
+        relabel_speaker_in_folder(dir.path().to_str().unwrap(), "Speaker 2", "Bob");
+
+        let content = std::fs::read_to_string(dir.path().join("speakers.json"))
+            .expect("failed to read speakers.json back");
+        let json: serde_json::Value = serde_json::from_str(&content).expect("invalid JSON written");
+        let arr = json["speakers"].as_array().expect("speakers must be an array");
+
+        let speaker_1 = arr
+            .iter()
+            .find(|s| s["label"] == "Speaker 1")
+            .expect("Speaker 1 entry missing");
+        assert_eq!(speaker_1["suggested"]["name"], "Alice", "Speaker 1 must keep its suggestion");
+
+        let bob = arr.iter().find(|s| s["label"] == "Bob").expect("renamed Bob entry missing");
+        assert!(bob.get("suggested").is_none(), "renamed entry must not keep its own suggestion");
     }
 }
