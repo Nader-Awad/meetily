@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.0 — 2026-07-14
+
+- **See which voices are saved.** Speaker Identification settings now shows an empty-state
+  when no voices are remembered yet, so it's clear whether the app has anything to recognize
+  you by (alongside the existing rename/forget list).
+- **Confirmable speaker suggestions.** When you retranscribe or import a meeting and a
+  speaker *nearly* matches a saved voice — close, but not confident enough to auto-name —
+  the transcript shows a subtle hint like **"Speaker 2 · Alice?"**. Click it to open the
+  rename dialog pre-filled with that name; one confirm applies it and reinforces the voice.
+  The app still never auto-labels on a weak match (no silent mis-attribution), and confirming
+  one suggestion no longer clears the others.
+
 ## v0.5.9 — 2026-07-14
 
 - **Fix: summaries now know who said what.** The built-in summary was sending the LLM the
