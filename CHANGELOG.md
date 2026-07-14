@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.5.6 — 2026-07-11
+
+- **Speakers are only auto-named when we're sure.** Cross-meeting voice recognition no
+  longer guesses: a detected speaker is auto-labeled with a saved voice only when that
+  voice is a clear, confident match (well ahead of any other candidate). When it's weak
+  or ambiguous, the speaker stays "Speaker N" for you to name — so a returning voice is
+  recognized, but the app won't confidently mislabel someone.
+- **Naming a voice strengthens it over time.** Each time you rename a speaker to a name
+  you've already saved (with "Remember this voice"), that profile is reinforced with the
+  new sample instead of creating a duplicate — so recognition improves the more you use it.
+
 ## v0.5.5 — 2026-07-10
 
 - **Renaming a speaker no longer mislabels everyone else.** Naming a speaker now
