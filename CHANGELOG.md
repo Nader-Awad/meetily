@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.5.7 — 2026-07-14
+
+- **"Remember this voice" is on by default.** When you name a speaker, the app now
+  remembers that voice for future meetings unless you deliberately turn it off — so you
+  no longer have to remember to tick the box for recognition to build up.
+- **No accidental duplicate/merge when you type an existing name.** If you type a name
+  that already exists (a saved voice or someone already named in this meeting), the app
+  asks whether it's the same person: choose "use existing" to merge/reinforce that voice,
+  or go back and pick a more specific name for a different person. Selecting someone from
+  the picklist still works as before.
+
 ## v0.5.6 — 2026-07-11
 
 - **Speakers are only auto-named when we're sure.** Cross-meeting voice recognition no
