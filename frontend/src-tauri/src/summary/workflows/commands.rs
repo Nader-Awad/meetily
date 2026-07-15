@@ -301,6 +301,36 @@ pub async fn api_save_neohive_config(
     .map_err(|e| { log_error!("api_save_neohive_config failed: {}", e); e.to_string() })
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObsidianConfigResponse {
+    pub vault_path: Option<String>,
+    pub enabled: bool,
+}
+
+#[tauri::command]
+pub async fn api_get_obsidian_config(
+    state: tauri::State<'_, AppState>,
+) -> Result<ObsidianConfigResponse, String> {
+    log_info!("api_get_obsidian_config called");
+    let cfg = SettingsRepository::get_obsidian_config(state.db_manager.pool())
+        .await
+        .map_err(|e| { log_error!("api_get_obsidian_config failed: {}", e); e.to_string() })?;
+    Ok(ObsidianConfigResponse { vault_path: cfg.vault_path, enabled: cfg.enabled })
+}
+
+#[tauri::command]
+pub async fn api_save_obsidian_config(
+    state: tauri::State<'_, AppState>,
+    vault_path: Option<String>,
+    enabled: bool,
+) -> Result<(), String> {
+    log_info!("api_save_obsidian_config called (enabled={})", enabled);
+    SettingsRepository::save_obsidian_config(state.db_manager.pool(), vault_path.as_deref(), enabled)
+        .await
+        .map_err(|e| { log_error!("api_save_obsidian_config failed: {}", e); e.to_string() })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::summary::workflows::models::{NeoHiveExportConfig, WorkflowInput};
