@@ -372,3 +372,66 @@ mod accrual_tests {
         assert!(out[0] > out[1] && out[1] > 0.0);
     }
 }
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    fn unit(v: Vec<f32>) -> Vec<f32> {
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        v.into_iter().map(|x| x / n).collect()
+    }
+
+    async fn test_pool() -> SqlitePool {
+        // Single connection so the in-memory schema persists across queries.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn exemplar_lifecycle_create_add_cap_delete() {
+        let pool = test_pool().await;
+
+        // create() seeds the profile's first exemplar.
+        let id = SpeakerProfilesRepository::create(&pool, "Alice", &unit(vec![1.0, 0.0, 0.0]))
+            .await
+            .unwrap();
+        let listed = SpeakerProfilesRepository::list_with_exemplars(&pool)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Alice");
+        assert_eq!(listed[0].exemplars.len(), 1);
+
+        // Adding beyond a cap of 2 evicts, so the count stays at 2.
+        SpeakerProfilesRepository::add_exemplar(&pool, &id, &unit(vec![0.0, 1.0, 0.0]), 2)
+            .await
+            .unwrap();
+        SpeakerProfilesRepository::add_exemplar(&pool, &id, &unit(vec![0.0, 0.0, 1.0]), 2)
+            .await
+            .unwrap();
+        let listed = SpeakerProfilesRepository::list_with_exemplars(&pool)
+            .await
+            .unwrap();
+        assert_eq!(listed[0].exemplars.len(), 2, "should cap at max_exemplars");
+
+        // The summary centroid is maintained (unit-norm) and delete cascades.
+        let summary = SpeakerProfilesRepository::list(&pool).await.unwrap()[0]
+            .embedding
+            .clone();
+        let norm = summary.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4, "summary must be unit-norm, got {norm}");
+
+        SpeakerProfilesRepository::delete(&pool, &id).await.unwrap();
+        assert!(SpeakerProfilesRepository::list_with_exemplars(&pool)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+}
