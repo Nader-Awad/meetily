@@ -12,6 +12,7 @@ pub mod commands;
 pub mod embedding;
 pub mod fbank;
 pub mod models;
+pub mod normalize;
 pub mod segmenter;
 pub mod session;
 

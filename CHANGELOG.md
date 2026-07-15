@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Speaker profiles can now actually tell people apart.** Fixed a bug where, with
+  many saved voices (~10+), retranscribed/imported meetings kept mislabeling
+  speakers or leaving them as "Speaker N". The CAM++ voice embeddings are strongly
+  *anisotropic* — every voice shares a large common component, so raw cosine put
+  *different* people at ~0.82 similarity (above the 0.72 auto-name bar), and
+  "training" more only made it worse by averaging voices toward that shared mean.
+  Matching now removes the shared component (cohort mean-centering) before
+  comparing, which restores a real decision margin. **No data migration:** saved
+  voice profiles and existing transcript labels are untouched — this only changes
+  how names are matched during Retranscribe/Import going forward.
+
 ## v0.6.1 — 2026-07-15
 
 - **Summarize meetings in new, focused ways.** Three new built-in workflow templates:
