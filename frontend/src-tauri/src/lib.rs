@@ -694,6 +694,7 @@ pub fn run() {
             summary::workflows::commands::api_save_neohive_config,
             summary::workflows::commands::api_get_obsidian_config,
             summary::workflows::commands::api_save_obsidian_config,
+            summary::workflows::commands::api_save_run_to_obsidian,
             // Built-in AI commands
             summary::summary_engine::commands::builtin_ai_list_models,
             summary::summary_engine::commands::builtin_ai_get_model_info,

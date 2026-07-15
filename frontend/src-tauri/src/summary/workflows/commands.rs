@@ -392,6 +392,88 @@ pub async fn api_save_obsidian_config(
         .map_err(|e| { log_error!("api_save_obsidian_config failed: {}", e); e.to_string() })
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObsidianSaveResult {
+    pub path: String,
+}
+
+/// Writes a completed run's markdown to the configured Obsidian vault folder.
+/// Shared by the manual command and the auto-save hook. Overwrites an existing
+/// same-day-same-title note by design (one clean note per meeting).
+pub(crate) async fn save_run_to_obsidian(
+    pool: &SqlitePool,
+    run_id: &str,
+) -> Result<ObsidianSaveResult, String> {
+    let run = WorkflowsRepository::get_run(pool, run_id)
+        .await.map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Run '{}' not found", run_id))?;
+    if run.status != WorkflowRunStatus::COMPLETED {
+        return Err("Only completed runs can be saved to Obsidian".to_string());
+    }
+
+    let obs = SettingsRepository::get_obsidian_config(pool).await.map_err(|e| e.to_string())?;
+    if !obs.enabled {
+        return Err("Obsidian export is disabled in Settings".to_string());
+    }
+    let vault = obs.vault_path.filter(|p| !p.trim().is_empty())
+        .ok_or("Obsidian vault path is not configured")?;
+    let vault_path = std::path::PathBuf::from(&vault);
+    if !vault_path.is_dir() {
+        return Err(format!("Obsidian vault path does not exist or is not a directory: {}", vault));
+    }
+
+    // Per-workflow config (subfolder, tags); default if workflow was deleted.
+    let cfg: ObsidianExportConfig = match &run.workflow_id {
+        Some(id) => WorkflowsRepository::get_workflow(pool, id).await.ok().flatten()
+            .map(|w| w.obsidian_config()).unwrap_or_default(),
+        None => ObsidianExportConfig::default(),
+    };
+
+    let meeting = MeetingsRepository::get_meeting_metadata(pool, &run.meeting_id)
+        .await.map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Meeting '{}' not found", run.meeting_id))?;
+    let attendees = MeetingsRepository::get_distinct_named_speakers(pool, &run.meeting_id)
+        .await.unwrap_or_default();
+
+    let (filename, contents) = build_obsidian_note(&run, &meeting, &attendees, &cfg);
+
+    // Resolve target dir (vault [+ subfolder]); create; assert it stays inside vault.
+    let target_dir = match cfg.subfolder.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(sub) => vault_path.join(sub),
+        None => vault_path.clone(),
+    };
+    std::fs::create_dir_all(&target_dir).map_err(|e| format!("Failed to create folder: {}", e))?;
+    let vault_canon = std::fs::canonicalize(&vault_path).map_err(|e| e.to_string())?;
+    let target_canon = std::fs::canonicalize(&target_dir).map_err(|e| e.to_string())?;
+    if !target_canon.starts_with(&vault_canon) {
+        return Err("Resolved Obsidian path escapes the vault folder".to_string());
+    }
+
+    let file_path = target_canon.join(&filename);
+    std::fs::write(&file_path, contents).map_err(|e| format!("Failed to write note: {}", e))?;
+    let path_str = file_path.to_string_lossy().to_string();
+
+    if let Err(e) = WorkflowsRepository::set_run_obsidian_result(pool, run_id, "saved", Some(&path_str)).await {
+        log_error!("Failed to update obsidian_status for run {}: {}", run_id, e);
+    }
+    Ok(ObsidianSaveResult { path: path_str })
+}
+
+#[tauri::command]
+pub async fn api_save_run_to_obsidian(
+    state: tauri::State<'_, AppState>,
+    run_id: String,
+) -> Result<ObsidianSaveResult, String> {
+    log_info!("api_save_run_to_obsidian called (run {})", run_id);
+    let res = save_run_to_obsidian(state.db_manager.pool(), &run_id).await;
+    if res.is_err() {
+        // best-effort mark failed so the UI badge reflects it
+        let _ = WorkflowsRepository::set_run_obsidian_result(state.db_manager.pool(), &run_id, "failed", None).await;
+    }
+    res
+}
+
 #[cfg(test)]
 mod tests {
     use crate::database::models::{MeetingModel, DateTimeUtc};
@@ -531,5 +613,48 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, "queued");
         assert_eq!(runs[0].neohive_status, "none");
+    }
+
+    #[tokio::test]
+    async fn save_run_to_obsidian_writes_file_and_sets_status() {
+        let pool = test_pool().await;
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().to_str().unwrap();
+
+        crate::database::repositories::setting::SettingsRepository::save_obsidian_config(&pool, Some(vault), true).await.unwrap();
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('m1','Sync','2026-07-15T10:00:00Z','2026-07-15T10:00:00Z')")
+            .execute(&pool).await.unwrap();
+
+        let input = crate::summary::workflows::models::WorkflowInput {
+            id: None, name: "Comp".into(), description: None,
+            template_id: "comprehensive_meeting".into(), custom_prompt: None,
+            provider: "openrouter".into(), model: "x/y".into(),
+            max_tokens: None, temperature: None, top_p: None,
+            neohive_export: None,
+            obsidian_export: Some(crate::summary::workflows::models::ObsidianExportConfig {
+                enabled: true, auto_export: true, subfolder: None, tags: vec![],
+            }),
+        };
+        let wf = WorkflowsRepository::upsert_workflow(&pool, &input).await.unwrap();
+        WorkflowsRepository::create_run(&pool, "r1", Some(&wf.id), &wf.name, "m1").await.unwrap();
+        WorkflowsRepository::complete_run(&pool, "r1", "## Overview\nhi", "[]", "completed").await.unwrap();
+
+        let res = super::save_run_to_obsidian(&pool, "r1").await.unwrap();
+        assert!(res.path.ends_with(".md"));
+        assert!(std::path::Path::new(&res.path).exists());
+        let run = WorkflowsRepository::get_run(&pool, "r1").await.unwrap().unwrap();
+        assert_eq!(run.obsidian_status, "saved");
+        assert_eq!(run.obsidian_path.as_deref(), Some(res.path.as_str()));
+    }
+
+    #[tokio::test]
+    async fn save_run_to_obsidian_errors_when_disabled() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('m1','Sync','2026-07-15T10:00:00Z','2026-07-15T10:00:00Z')")
+            .execute(&pool).await.unwrap();
+        WorkflowsRepository::create_run(&pool, "r1", None, "W", "m1").await.unwrap();
+        WorkflowsRepository::complete_run(&pool, "r1", "x", "[]", "completed").await.unwrap();
+        let err = super::save_run_to_obsidian(&pool, "r1").await.unwrap_err();
+        assert!(err.to_lowercase().contains("obsidian"));
     }
 }

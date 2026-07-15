@@ -189,6 +189,22 @@ impl MeetingsRepository {
         Ok(true)
     }
 
+    /// Distinct named speakers for a meeting, excluding the "Speaker N" placeholder.
+    pub async fn get_distinct_named_speakers(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT speaker FROM transcripts \
+             WHERE meeting_id = ? AND speaker IS NOT NULL AND TRIM(speaker) != '' \
+             AND speaker NOT GLOB 'Speaker *' ORDER BY speaker",
+        )
+        .bind(meeting_id)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows.into_iter().map(|(s,)| s).collect())
+    }
+
     pub async fn update_meeting_name(
         pool: &SqlitePool,
         meeting_id: &str,
