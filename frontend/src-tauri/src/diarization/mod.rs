@@ -11,6 +11,7 @@ pub mod clustering;
 pub mod commands;
 pub mod embedding;
 pub mod fbank;
+pub mod flagging;
 pub mod models;
 pub mod normalize;
 pub mod segmenter;

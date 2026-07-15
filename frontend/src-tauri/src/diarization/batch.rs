@@ -98,7 +98,9 @@ pub fn merge_turns(turns: &[DiarTurn], min_unit_ms: u64, merge_gap_ms: u64) -> V
 /// embeddings and the strict RAW thresholds. Callers rank a query cluster with
 /// `ranked` and read `high`/`margin`/`suggest_floor` for the gate. Pure.
 struct ProfileMatcher<'a> {
-    /// (name, embedding) in the active scoring space (centered when `mean` set).
+    /// (name, exemplar) in the active scoring space (centered when `mean` set).
+    /// A name may appear MULTIPLE times — one entry per saved voice exemplar;
+    /// `ranked` aggregates them to one score per name (max over exemplars).
     profiles: Vec<(&'a str, Vec<f32>)>,
     /// `Some(mean)` in the centered regime — queries get centered by it too.
     mean: Option<Vec<f32>>,
@@ -120,10 +122,17 @@ impl<'a> ProfileMatcher<'a> {
             .chain(profiles.iter().map(|(_, e)| e.as_slice()))
             .collect();
 
-        // Gate on the PROFILE count (stable for a given user) rather than the
-        // cohort size, so the scoring regime does not flip between meetings just
-        // because a different number of people happened to speak.
-        let mean = if profiles.len() >= MIN_PROFILES_FOR_CENTERING {
+        // Gate on the number of DISTINCT PROFILES (stable for a given user), not
+        // the entry/cohort count — `profiles` is a flat exemplar list with
+        // possibly several entries per name, and a different number of speakers
+        // per meeting shouldn't flip the scoring regime.
+        let n_profiles = {
+            let mut names: Vec<&str> = profiles.iter().map(|(n, _)| n.as_str()).collect();
+            names.sort_unstable();
+            names.dedup();
+            names.len()
+        };
+        let mean = if n_profiles >= MIN_PROFILES_FOR_CENTERING {
             cohort_mean(&cohort)
         } else {
             None
@@ -165,21 +174,30 @@ impl<'a> ProfileMatcher<'a> {
         self.mean.is_some()
     }
 
-    /// Profiles ranked best-first by similarity to `query`, in the active
-    /// scoring space. `query` is centered by the cohort mean when centering is
-    /// active. Empty when there are no profiles.
+    /// Distinct profile NAMES ranked best-first by similarity to `query`, where
+    /// a name's score is the MAX over its exemplars (a query need only resemble
+    /// one enrolled sample). `query` is centered by the cohort mean when
+    /// centering is active. Empty when there are no profiles.
     fn ranked(&self, query: &[f32]) -> Vec<(&'a str, f32)> {
         let q = match &self.mean {
             Some(m) => center_normalized(query, m),
             None => query.to_vec(),
         };
-        let mut sims: Vec<(&'a str, f32)> = self
-            .profiles
-            .iter()
-            .map(|(name, emb)| (*name, cosine_similarity(&q, emb)))
-            .collect();
-        sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        sims
+        // Aggregate per name: keep the best-matching exemplar's score.
+        let mut best: Vec<(&'a str, f32)> = Vec::new();
+        for (name, emb) in &self.profiles {
+            let s = cosine_similarity(&q, emb);
+            match best.iter_mut().find(|(n, _)| n == name) {
+                Some(entry) => {
+                    if s > entry.1 {
+                        entry.1 = s;
+                    }
+                }
+                None => best.push((*name, s)),
+            }
+        }
+        best.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        best
     }
 }
 
@@ -416,6 +434,22 @@ mod tests {
         let profiles = vec![("Alice".to_string(), unit(vec![1.0, 0.0, 0.0]))];
         let map = map_local_speakers_to_profiles(&[("A".to_string(), cluster)], &profiles);
         assert_eq!(map.get("A").map(String::as_str), Some("Alice"));
+    }
+
+    #[test]
+    fn multi_exemplar_matches_via_best_exemplar_without_false_ambiguity() {
+        // P0 has TWO exemplars far apart; a query near the 2nd one matches P0.
+        // The two same-name exemplars must aggregate to ONE name (max score), so
+        // the runner-up is P1 (a different person), not P0's other exemplar —
+        // otherwise the competitive margin would spuriously fail.
+        let profiles = vec![
+            ("P0".to_string(), unit(vec![1.0, 0.0, 0.0])),
+            ("P0".to_string(), unit(vec![0.0, 0.0, 1.0])),
+            ("P1".to_string(), unit(vec![0.0, 1.0, 0.0])),
+        ];
+        let query = unit(vec![0.02, 0.0, 1.0]); // ~ P0's 2nd exemplar
+        let map = map_local_speakers_to_profiles(&[("A".to_string(), query)], &profiles);
+        assert_eq!(map.get("A").map(String::as_str), Some("P0"));
     }
 
     #[test]

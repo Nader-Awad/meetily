@@ -39,6 +39,11 @@ pub struct SpeakerCluster {
     /// toward "Speaker N" numbering and excluded from centroid snapshots
     /// until they have real segments).
     pub from_profile: bool,
+    /// Saved voice exemplars for a `from_profile` cluster (empty for anonymous
+    /// clusters). Profile adoption scores a segment against the BEST-matching
+    /// exemplar; `centroid` is their summary mean (used for the raw fallback and
+    /// as the running mean once the cluster becomes active).
+    pub exemplars: Vec<Vec<f32>>,
 }
 
 pub struct SpeakerClusterer {
@@ -62,6 +67,25 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
+/// Normalized mean of a profile's exemplars — its summary centroid (used for
+/// the raw fallback and as the running-mean base once the cluster goes active).
+/// Empty if there are no usable exemplars.
+fn summary_centroid(exemplars: &[Vec<f32>]) -> Vec<f32> {
+    let refs: Vec<&[f32]> = exemplars.iter().map(|e| e.as_slice()).collect();
+    match cohort_mean(&refs) {
+        Some(mut m) => {
+            let norm = m.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                for v in &mut m {
+                    *v /= norm;
+                }
+            }
+            m
+        }
+        None => Vec::new(),
+    }
+}
+
 impl SpeakerClusterer {
     pub fn new() -> Self {
         Self::with_max_anonymous_speakers(DEFAULT_MAX_ANONYMOUS_SPEAKERS)
@@ -78,22 +102,29 @@ impl SpeakerClusterer {
         }
     }
 
-    /// Seed the clusterer with a saved voice profile so returning speakers
-    /// are recognized by name instead of getting an anonymous label.
+    /// Seed the clusterer with a saved voice profile (its stored exemplars) so
+    /// returning speakers are recognized by name instead of an anonymous label.
+    /// The cluster's summary `centroid` is the normalized mean of the exemplars;
+    /// adoption scores a segment against the best-matching individual exemplar.
     ///
     /// Seed ALL profiles before the first `assign()`: the shared-anisotropy
     /// center is estimated once from the seeded set on the first assign, so a
     /// profile added afterwards would be excluded from that estimate.
-    pub fn seed_profile(&mut self, name: &str, centroid: Vec<f32>) {
+    pub fn seed_profile(&mut self, name: &str, exemplars: Vec<Vec<f32>>) {
         debug_assert!(
             !self.center_ready,
             "seed_profile called after the anisotropy center was estimated; seed all profiles before the first assign()"
         );
+        if exemplars.is_empty() {
+            return;
+        }
+        let centroid = summary_centroid(&exemplars);
         self.clusters.push(SpeakerCluster {
             centroid,
             count: 0,
             label: name.to_string(),
             from_profile: true,
+            exemplars,
         });
     }
 
@@ -173,9 +204,9 @@ impl SpeakerClusterer {
         label
     }
 
-    /// Lazily (once) estimate the shared anisotropy direction as the mean of the
-    /// seeded profile centroids, when there are at least
-    /// `MIN_PROFILES_FOR_CENTERING` of them. Memoized via `center_ready`.
+    /// Lazily (once) estimate the shared anisotropy direction as the mean of all
+    /// seeded profiles' exemplars, when at least `MIN_PROFILES_FOR_CENTERING`
+    /// distinct profiles are seeded. Memoized via `center_ready`.
     ///
     /// Estimated from the seeded profiles ONLY (not the meeting's live clusters),
     /// deliberately: this keeps the center stable for the whole meeting so it can
@@ -186,15 +217,17 @@ impl SpeakerClusterer {
             return;
         }
         self.center_ready = true;
-        let profile_centroids: Vec<&[f32]> = self
+        let n_profiles = self.clusters.iter().filter(|c| c.from_profile).count();
+        if n_profiles < MIN_PROFILES_FOR_CENTERING {
+            return;
+        }
+        let exemplars: Vec<&[f32]> = self
             .clusters
             .iter()
             .filter(|c| c.from_profile)
-            .map(|c| c.centroid.as_slice())
+            .flat_map(|c| c.exemplars.iter().map(|e| e.as_slice()))
             .collect();
-        if profile_centroids.len() >= MIN_PROFILES_FOR_CENTERING {
-            self.profile_center = cohort_mean(&profile_centroids);
-        }
+        self.profile_center = cohort_mean(&exemplars);
     }
 
     /// Among the unmatched seeded-profile clusters, return the index of the one
@@ -213,8 +246,17 @@ impl SpeakerClusterer {
             .enumerate()
             .filter(|(_, c)| c.from_profile && c.count == 0)
             .map(|(i, c)| {
-                let pc = center_normalized(&c.centroid, center);
-                (i, cosine_similarity(&q, &pc))
+                // A profile's score is its BEST-matching exemplar (fall back to
+                // the summary centroid only if it somehow has no exemplars).
+                let best = if c.exemplars.is_empty() {
+                    cosine_similarity(&q, &center_normalized(&c.centroid, center))
+                } else {
+                    c.exemplars
+                        .iter()
+                        .map(|ex| cosine_similarity(&q, &center_normalized(ex, center)))
+                        .fold(f32::MIN, f32::max)
+                };
+                (i, best)
             })
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -257,6 +299,7 @@ impl SpeakerClusterer {
             count: 1,
             label: label.clone(),
             from_profile: false,
+            exemplars: Vec::new(),
         });
         label
     }
@@ -351,11 +394,11 @@ mod tests {
         unit(v)
     }
 
-    /// Seed 8 profiles on axes 0..8 (>= MIN_PROFILES_FOR_CENTERING), leaving
-    /// axis 8 free for a "new voice" not represented by any profile.
+    /// Seed 8 single-exemplar profiles on axes 0..=7 (>= MIN_PROFILES_FOR_CENTERING),
+    /// leaving axis 8 free for a "new voice" not represented by any profile.
     fn seed_eight(c: &mut SpeakerClusterer) {
         for i in 0..8 {
-            c.seed_profile(&format!("P{i}"), aniso9(i, 0.0));
+            c.seed_profile(&format!("P{i}"), vec![aniso9(i, 0.0)]);
         }
     }
 
@@ -385,8 +428,8 @@ mod tests {
         // Fewer than MIN_PROFILES_FOR_CENTERING profiles -> no centering; a close
         // segment still adopts a profile via the raw path (previous behavior).
         let mut c = SpeakerClusterer::new();
-        c.seed_profile("P0", unit(vec![1.0, 0.0, 0.0]));
-        c.seed_profile("P1", unit(vec![0.0, 1.0, 0.0]));
+        c.seed_profile("P0", vec![unit(vec![1.0, 0.0, 0.0])]);
+        c.seed_profile("P1", vec![unit(vec![0.0, 1.0, 0.0])]);
         assert_eq!(c.assign(&unit(vec![0.98, 0.05, 0.0])), "P0");
     }
 
@@ -398,5 +441,21 @@ mod tests {
         // A second, slightly different segment of the same speaker stays P3
         // (now an active cluster matched via ordinary clustering).
         assert_eq!(c.assign(&aniso9(3, 0.35)), "P3");
+    }
+
+    #[test]
+    fn live_adopts_via_best_exemplar_not_summary() {
+        // P3 has TWO exemplars: its usual axis 3 and the otherwise-unused axis 8.
+        // A segment near the SECOND exemplar (axis 8) still adopts P3, even though
+        // P3's summary centroid is the mean of axes 3 and 8 (max-over-exemplars).
+        let mut c = SpeakerClusterer::new();
+        for i in 0..8 {
+            if i == 3 {
+                c.seed_profile("P3", vec![aniso9(3, 0.0), aniso9(8, 0.0)]);
+            } else {
+                c.seed_profile(&format!("P{i}"), vec![aniso9(i, 0.0)]);
+            }
+        }
+        assert_eq!(c.assign(&aniso9(8, 0.4)), "P3");
     }
 }

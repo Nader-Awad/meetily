@@ -11,7 +11,7 @@ import { Button } from './ui/button';
 import { Label } from './ui/label';
 import { Switch } from './ui/switch';
 import { Progress } from './ui/progress';
-import { Download, Mic2, Pencil, Trash2 } from 'lucide-react';
+import { AlertTriangle, Download, Mic2, Pencil, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface DiarizationStatus {
@@ -25,6 +25,12 @@ interface VoiceProfile {
   name: string;
 }
 
+interface ConfusableFlag {
+  name: string;
+  confusedWith: string;
+  score: number;
+}
+
 interface DownloadProgressEvent {
   downloaded_bytes: number;
   total_bytes: number;
@@ -36,6 +42,7 @@ export function SpeakerIdentificationSettings() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadPercent, setDownloadPercent] = useState(0);
   const [profiles, setProfiles] = useState<VoiceProfile[]>([]);
+  const [flags, setFlags] = useState<Record<string, string>>({});
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -52,6 +59,15 @@ export function SpeakerIdentificationSettings() {
       setProfiles(result);
     } catch (err) {
       console.error('Failed to fetch voice profiles:', err);
+    }
+    // Best-effort: flag voices that are confusable with another saved voice
+    // (usually a sign of a contaminated profile). Never blocks the list.
+    try {
+      const raw = await invoke<ConfusableFlag[]>('diarization_flag_confusable_profiles');
+      setFlags(Object.fromEntries(raw.map((f) => [f.name, f.confusedWith])));
+    } catch (err) {
+      console.error('Failed to fetch confusable-voice flags:', err);
+      setFlags({});
     }
   }, []);
 
@@ -198,7 +214,18 @@ export function SpeakerIdentificationSettings() {
                     onBlur={() => handleRenameProfile(profile)}
                   />
                 ) : (
-                  <span>{profile.name}</span>
+                  <span className="flex items-center gap-1.5">
+                    {profile.name}
+                    {flags[profile.name] && (
+                      <span
+                        className="inline-flex items-center gap-1 text-xs text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded"
+                        title={`This voice looks confusable with "${flags[profile.name]}" — one of them may be contaminated (contains another person's audio). Consider forgetting and re-recording it.`}
+                      >
+                        <AlertTriangle className="h-3 w-3" />
+                        may clash with {flags[profile.name]}
+                      </span>
+                    )}
+                  </span>
                 )}
                 <span className="flex gap-1">
                   <Button
