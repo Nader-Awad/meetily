@@ -19,6 +19,14 @@
 //
 // This module is pure (no I/O, no model calls) and fully unit-testable.
 
+/// Minimum number of *saved profiles* required before we trust a mean estimate
+/// of the shared anisotropy direction and switch on centering. Gating on the
+/// profile count (which is stable for a given user) rather than a per-call
+/// cohort size keeps the scoring regime consistent from meeting to meeting.
+/// Below this, mean estimation is too noisy / ill-conditioned (e.g. two vectors
+/// centered by their own mean become antipodal), so callers stay in raw space.
+pub const MIN_PROFILES_FOR_CENTERING: usize = 8;
+
 /// Element-wise mean of a cohort of equal-length embeddings.
 ///
 /// Embeddings whose length differs from the first usable one are skipped

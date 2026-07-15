@@ -5,7 +5,7 @@
 // callers supply CAM++ centroids; this module is fully unit-testable.
 
 use super::clustering::cosine_similarity;
-use super::normalize::{center_normalized, cohort_mean};
+use super::normalize::{center_normalized, cohort_mean, MIN_PROFILES_FOR_CENTERING};
 use super::segmenter::DiarTurn;
 use std::collections::HashMap;
 
@@ -33,10 +33,15 @@ pub const MERGE_GAP_MS: u64 = 500;
 //    same-speaker median ~0.7). Values are conservative — tune toward higher
 //    recall (lower threshold) or higher precision (higher threshold) as needed.
 //
-//  * RAW space (fallback): when too few embeddings exist to estimate the shared
-//    direction (e.g. a brand-new user with one or two profiles), centering is
+//  * RAW space (fallback): when too few saved profiles exist to estimate the
+//    shared direction (see `MIN_PROFILES_FOR_CENTERING`), centering is
 //    ill-conditioned, so we fall back to raw cosine with the original,
 //    deliberately strict thresholds.
+//
+// NOTE: the CENTERED_* values below were calibrated on a single user's ~14
+// profiles / 10 meetings. They are deliberately conservative (favor abstaining
+// as "Speaker N" over a confident wrong name) and are safe to tune; they have
+// not been validated across other mics / languages / voice populations.
 
 /// Auto-adopt threshold in RAW cosine space (fallback regime).
 pub const HIGH_MATCH_THRESHOLD: f32 = 0.72;
@@ -49,12 +54,6 @@ pub const CENTERED_HIGH_MATCH_THRESHOLD: f32 = 0.60;
 pub const CENTERED_MATCH_MARGIN: f32 = 0.12;
 /// Near-match suggestion floor in CENTERED space (analogue of `SUGGEST_FLOOR`).
 pub const CENTERED_SUGGEST_FLOOR: f32 = 0.42;
-
-/// Minimum cohort size (local clusters + saved profiles) required before we
-/// trust a cohort-mean estimate of the anisotropy direction and switch to
-/// centered scoring. Below this, mean-centering is degenerate (e.g. two vectors
-/// centered by their own mean become antipodal), so we stay in raw space.
-pub const MIN_COHORT_FOR_CENTERING: usize = 8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiarUnit {
@@ -92,9 +91,9 @@ pub fn merge_turns(turns: &[DiarTurn], min_unit_ms: u64, merge_gap_ms: u64) -> V
 /// Scores clusters against saved profiles with anisotropy correction.
 ///
 /// On construction it picks a scoring regime from how much enrolled data is
-/// available. If the cohort (this meeting's local cluster centroids ∪ the saved
-/// profile embeddings) is at least `MIN_COHORT_FOR_CENTERING`, it estimates the
-/// shared anisotropy direction (`cohort_mean`), pre-centers the profile
+/// available. If at least `MIN_PROFILES_FOR_CENTERING` profiles are saved, it
+/// estimates the shared anisotropy direction (`cohort_mean` over this meeting's
+/// local cluster centroids ∪ the saved profiles), pre-centers the profile
 /// embeddings, and uses the CENTERED_* thresholds; otherwise it keeps the raw
 /// embeddings and the strict RAW thresholds. Callers rank a query cluster with
 /// `ranked` and read `high`/`margin`/`suggest_floor` for the gate. Pure.
@@ -110,15 +109,21 @@ struct ProfileMatcher<'a> {
 
 impl<'a> ProfileMatcher<'a> {
     fn new(local_centroids: &[(String, Vec<f32>)], profiles: &'a [(String, Vec<f32>)]) -> Self {
+        // Estimate the shared anisotropy direction from as many embeddings as we
+        // have this call: the meeting's local cluster centroids plus the saved
+        // profiles. Including the query clusters is standard for global
+        // mean-centering — each contributes ~1/N and the effect is symmetric
+        // across queries, so it is not material leakage.
         let cohort: Vec<&[f32]> = local_centroids
             .iter()
             .map(|(_, c)| c.as_slice())
             .chain(profiles.iter().map(|(_, e)| e.as_slice()))
             .collect();
 
-        // Only trust a cohort-mean estimate of the shared direction once we have
-        // enough embeddings; below that, centering is ill-conditioned.
-        let mean = if cohort.len() >= MIN_COHORT_FOR_CENTERING {
+        // Gate on the PROFILE count (stable for a given user) rather than the
+        // cohort size, so the scoring regime does not flip between meetings just
+        // because a different number of people happened to speak.
+        let mean = if profiles.len() >= MIN_PROFILES_FOR_CENTERING {
             cohort_mean(&cohort)
         } else {
             None
@@ -195,6 +200,9 @@ pub fn map_local_speakers_to_profiles(
 
         let confident = match sims.first() {
             Some((name, best)) => {
+                // Single-profile fallback of 0.0 is deliberate: in centered space
+                // 0.0 is ~the impostor median, so "best - 0.0 >= margin" is a
+                // meaningful bar (don't "simplify" this to -1.0 or -inf).
                 let runner_up = sims.get(1).map(|(_, s)| *s).unwrap_or(0.0);
                 if *best >= matcher.high && (*best - runner_up) >= matcher.margin {
                     Some((*name).to_string())
@@ -522,7 +530,7 @@ mod tests {
 
     // --- centered (anisotropy-corrected) regime -----------------------------
     //
-    // The small-fixture tests above all have cohorts < MIN_COHORT_FOR_CENTERING,
+    // The small-fixture tests above all have < MIN_PROFILES_FOR_CENTERING profiles,
     // so they exercise (and pin) the RAW fallback path. The tests below build a
     // cohort large enough to trigger centering and verify it separates speakers
     // that raw cosine cannot.
@@ -542,7 +550,7 @@ mod tests {
 
     #[test]
     fn centered_regime_activates_with_enough_cohort() {
-        // 2 locals + 8 profiles = 10 >= MIN_COHORT_FOR_CENTERING.
+        // 8 profiles >= MIN_PROFILES_FOR_CENTERING (regime gates on profile count).
         let locals = vec![
             ("L2".to_string(), aniso8(2, 0.4)),
             ("L5".to_string(), aniso8(5, 0.4)),
@@ -555,7 +563,7 @@ mod tests {
 
     #[test]
     fn raw_regime_when_cohort_too_small() {
-        // 1 local + 3 profiles = 4 < MIN_COHORT_FOR_CENTERING -> raw fallback.
+        // 3 profiles < MIN_PROFILES_FOR_CENTERING -> raw fallback.
         let locals = vec![("L0".to_string(), aniso8(0, 0.4))];
         let profiles: Vec<(String, Vec<f32>)> =
             (0..3).map(|i| (format!("P{i}"), aniso8(i, 0.0))).collect();
