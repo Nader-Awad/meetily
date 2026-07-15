@@ -10,7 +10,7 @@ import { Switch } from '@/components/ui/switch';
 import { Plus, Pencil, Trash2, Eye, EyeOff } from 'lucide-react';
 import { useWorkflows } from '@/hooks/meeting-details/useWorkflows';
 import { WorkflowEditor } from './WorkflowEditor';
-import { NeoHiveAuthConfig, NeoHiveSettings, Workflow } from '@/types/workflow';
+import { NeoHiveAuthConfig, NeoHiveSettings, ObsidianSettings, Workflow } from '@/types/workflow';
 
 const DEFAULT_ENDPOINT = 'https://neohive.logilica.com/projects/e95faa80-9092-478d-98b0-19ef8158efb8/mcp';
 
@@ -23,6 +23,9 @@ export function WorkflowsSettings() {
     endpoint: null, enabled: false, authType: 'cloudflare_access', authConfig: {},
   });
   const [showSecret, setShowSecret] = useState(false);
+
+  // Obsidian export
+  const [obs, setObs] = useState<ObsidianSettings>({ vaultPath: null, enabled: false });
 
   const setField = (k: keyof NeoHiveAuthConfig, v: string) =>
     setNeo((n) => ({ ...n, authConfig: { ...n.authConfig, [k]: v } }));
@@ -38,6 +41,12 @@ export function WorkflowsSettings() {
       .catch((e) => console.error('Failed to load NeoHive config:', e));
   }, []);
 
+  useEffect(() => {
+    invoke<ObsidianSettings>('api_get_obsidian_config')
+      .then((cfg) => setObs({ vaultPath: cfg.vaultPath ?? null, enabled: cfg.enabled }))
+      .catch((e) => console.error('Failed to load Obsidian config:', e));
+  }, []);
+
   const saveNeo = async () => {
     try {
       await invoke('api_save_neohive_config', {
@@ -50,6 +59,16 @@ export function WorkflowsSettings() {
     } catch (e) {
       console.error('Failed to save NeoHive settings:', e);
       toast.error('Failed to save NeoHive settings');
+    }
+  };
+
+  const saveObs = async () => {
+    try {
+      await invoke('api_save_obsidian_config', { vaultPath: obs.vaultPath || null, enabled: obs.enabled });
+      toast.success('Obsidian settings saved');
+    } catch (e) {
+      console.error('Failed to save Obsidian settings:', e);
+      toast.error('Failed to save Obsidian settings');
     }
   };
 
@@ -154,6 +173,32 @@ export function WorkflowsSettings() {
         )}
 
         <div className="flex justify-end"><Button onClick={saveNeo}>Save NeoHive settings</Button></div>
+      </section>
+
+      {/* Obsidian export */}
+      <section className="space-y-3 border rounded-lg p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="font-medium">Obsidian export</h3>
+            <p className="text-xs text-muted-foreground">
+              Workflow runs with &quot;Save to Obsidian&quot; enabled write a markdown note into this folder.
+            </p>
+          </div>
+          <Switch checked={obs.enabled} onCheckedChange={(v) => setObs((o) => ({ ...o, enabled: v }))} />
+        </div>
+
+        <div className="space-y-1">
+          <Label>Vault folder path</Label>
+          <Input
+            value={obs.vaultPath ?? ''}
+            onChange={(e) => setObs((o) => ({ ...o, vaultPath: e.target.value }))}
+            placeholder="/Users/you/Obsidian/Vault/Meeting Notes"
+          />
+        </div>
+
+        <div className="flex justify-end">
+          <Button size="sm" onClick={saveObs}>Save Obsidian settings</Button>
+        </div>
       </section>
 
       {/* Workflows list */}

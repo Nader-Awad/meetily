@@ -249,4 +249,17 @@ mod tests {
         let result = validate_and_parse_template("invalid json");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_new_builtin_templates_are_valid() {
+        for content in [
+            include_str!("../../../templates/technical_decisions.json"),
+            include_str!("../../../templates/action_items.json"),
+            include_str!("../../../templates/comprehensive_meeting.json"),
+        ] {
+            let template = validate_and_parse_template(content).expect("template should be valid");
+            assert!(!template.name.is_empty());
+            assert!(!template.sections.is_empty());
+        }
+    }
 }

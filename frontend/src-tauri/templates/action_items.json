@@ -1,0 +1,17 @@
+{
+  "name": "Action Items",
+  "description": "Extracts a clean, assignable list of action items from the meeting.",
+  "sections": [
+    {
+      "title": "Action Items",
+      "instruction": "List all concrete action items agreed during the meeting. For each item give the owner, the task, the due date if one was stated, and a reference to the transcript segment or timestamp where it was agreed.",
+      "format": "list",
+      "item_format": "| **Owner** | Task | Due | Reference |\n| --- | --- | --- | --- |"
+    },
+    {
+      "title": "Unassigned / Needs Owner",
+      "instruction": "List tasks or follow-ups that were mentioned but do not yet have a clear owner.",
+      "format": "list"
+    }
+  ]
+}

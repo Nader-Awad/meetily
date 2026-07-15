@@ -31,6 +31,8 @@ export interface Workflow {
   topP?: number | null;
   /** Raw JSON string of NeoHiveExportConfig as stored; parse if needed. */
   neohiveExport?: string | null;
+  /** Raw JSON string of ObsidianExportConfig as stored; parse if needed. */
+  obsidianExport?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -48,6 +50,7 @@ export interface WorkflowInput {
   temperature?: number | null;
   topP?: number | null;
   neohiveExport?: NeoHiveExportConfig | null;
+  obsidianExport?: ObsidianExportConfig | null;
 }
 
 export interface ParsedSection {
@@ -66,6 +69,8 @@ export interface WorkflowRun {
   resultSections?: string | null;
   error?: string | null;
   neohiveStatus: NeoHiveRunStatus;
+  obsidianStatus: ObsidianRunStatus;
+  obsidianPath?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -102,4 +107,31 @@ export const DEFAULT_NEOHIVE_EXPORT: NeoHiveExportConfig = {
   sectionTypeOverrides: {},
   defaultType: 'narrative',
   importance: 6,
+};
+
+export type ObsidianRunStatus = 'none' | 'saved' | 'failed';
+
+export interface ObsidianExportConfig {
+  enabled: boolean;
+  autoExport: boolean;
+  /** Relative subfolder under the configured vault path. */
+  subfolder?: string | null;
+  /** Extra frontmatter tags on top of the defaults ["meeting","meetily"]. */
+  tags: string[];
+}
+
+export interface ObsidianSettings {
+  vaultPath: string | null;
+  enabled: boolean;
+}
+
+export interface ObsidianSaveResult {
+  path: string;
+}
+
+export const DEFAULT_OBSIDIAN_EXPORT: ObsidianExportConfig = {
+  enabled: false,
+  autoExport: false,
+  subfolder: null,
+  tags: [],
 };

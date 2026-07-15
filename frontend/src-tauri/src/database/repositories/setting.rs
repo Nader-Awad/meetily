@@ -32,6 +32,12 @@ pub struct NeoHiveSettings {
     pub auth_config: Option<String>, // JSON string of method fields
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ObsidianSettings {
+    pub vault_path: Option<String>,
+    pub enabled: bool,
+}
+
 // Transcript providers: localWhisper, deepgram, elevenLabs, groq, openai
 // Summary providers: openai, claude, ollama, groq, added openrouter
 // NOTE: Handle data exclusion in the higher layer as this is database abstraction layer(using SELECT *)
@@ -412,6 +418,46 @@ impl SettingsRepository {
         .await?;
         Ok(())
     }
+
+    // ===== OBSIDIAN VAULT SETTINGS =====
+
+    pub async fn get_obsidian_config(
+        pool: &SqlitePool,
+    ) -> std::result::Result<ObsidianSettings, sqlx::Error> {
+        let row: Option<(Option<String>, Option<i64>)> = sqlx::query_as(
+            "SELECT obsidianVaultPath, obsidianEnabled FROM settings WHERE id = '1' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await?;
+        Ok(match row {
+            Some((vault_path, enabled)) => ObsidianSettings {
+                vault_path,
+                enabled: enabled.unwrap_or(0) != 0,
+            },
+            None => ObsidianSettings::default(),
+        })
+    }
+
+    pub async fn save_obsidian_config(
+        pool: &SqlitePool,
+        vault_path: Option<&str>,
+        enabled: bool,
+    ) -> std::result::Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO settings (id, provider, model, whisperModel, obsidianVaultPath, obsidianEnabled)
+            VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                obsidianVaultPath = excluded.obsidianVaultPath,
+                obsidianEnabled = excluded.obsidianEnabled
+            "#,
+        )
+        .bind(vault_path)
+        .bind(if enabled { 1_i64 } else { 0_i64 })
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -503,5 +549,30 @@ mod neohive_settings_tests {
             crate::neohive::NeoHiveAuth::CloudflareAccess { client_id, client_secret }
                 if client_id == "cid-legacy" && client_secret == "csec-legacy"
         ));
+    }
+}
+
+#[cfg(test)]
+mod obsidian_settings_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn defaults_then_save_then_read() {
+        let pool = pool().await;
+        let cfg = SettingsRepository::get_obsidian_config(&pool).await.unwrap();
+        assert!(cfg.vault_path.is_none());
+        assert!(!cfg.enabled);
+
+        SettingsRepository::save_obsidian_config(&pool, Some("/vault/Meetings"), true).await.unwrap();
+        let cfg = SettingsRepository::get_obsidian_config(&pool).await.unwrap();
+        assert_eq!(cfg.vault_path.as_deref(), Some("/vault/Meetings"));
+        assert!(cfg.enabled);
     }
 }

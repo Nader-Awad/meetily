@@ -78,6 +78,15 @@ pub async fn run_workflow_background<R: tauri::Runtime>(
                             tracing::warn!("Auto-export to NeoHive failed for run {}: {}", run_id, e);
                         }
                     }
+
+                    let obs = workflow.obsidian_config();
+                    if obs.enabled && obs.auto_export {
+                        // `save_run_to_obsidian` already marks the run `failed` itself at
+                        // genuine filesystem-failure points; just log here.
+                        if let Err(e) = crate::summary::workflows::commands::save_run_to_obsidian(&pool, &run_id).await {
+                            tracing::warn!("Auto-save to Obsidian failed for run {}: {}", run_id, e);
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("Failed to persist completed workflow run {}: {}", run_id, e);

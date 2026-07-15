@@ -3,17 +3,19 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import { Copy, Send, Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import { Copy, Send, Loader2, CheckCircle2, XCircle, FolderDown } from 'lucide-react';
 import { WorkflowRun } from '@/types/workflow';
 
 interface WorkflowRunCardProps {
   run: WorkflowRun;
   onExport: (runId: string) => Promise<unknown>;
   onCancel: (runId: string) => Promise<unknown>;
+  onSaveToObsidian: (runId: string) => Promise<unknown>;
 }
 
-export function WorkflowRunCard({ run, onExport, onCancel }: WorkflowRunCardProps) {
+export function WorkflowRunCard({ run, onExport, onCancel, onSaveToObsidian }: WorkflowRunCardProps) {
   const [exporting, setExporting] = useState(false);
+  const [savingObsidian, setSavingObsidian] = useState(false);
   const inProgress = run.status === 'queued' || run.status === 'running';
 
   const copy = async () => {
@@ -24,6 +26,11 @@ export function WorkflowRunCard({ run, onExport, onCancel }: WorkflowRunCardProp
   const doExport = async () => {
     setExporting(true);
     try { await onExport(run.id); } finally { setExporting(false); }
+  };
+
+  const doSaveObsidian = async () => {
+    setSavingObsidian(true);
+    try { await onSaveToObsidian(run.id); } finally { setSavingObsidian(false); }
   };
 
   return (
@@ -38,6 +45,9 @@ export function WorkflowRunCard({ run, onExport, onCancel }: WorkflowRunCardProp
           {run.neohiveStatus !== 'none' && (
             <span className="text-xs rounded px-1.5 py-0.5 bg-muted">NeoHive: {run.neohiveStatus}</span>
           )}
+          {run.obsidianStatus !== 'none' && (
+            <span className="text-xs rounded px-1.5 py-0.5 bg-muted" title={run.obsidianPath ?? ''}>Obsidian: {run.obsidianStatus}</span>
+          )}
         </div>
         <div className="flex gap-1">
           {inProgress && <Button variant="ghost" size="sm" onClick={() => onCancel(run.id)}>Cancel</Button>}
@@ -47,6 +57,10 @@ export function WorkflowRunCard({ run, onExport, onCancel }: WorkflowRunCardProp
               <Button variant="outline" size="sm" onClick={doExport} disabled={exporting}>
                 {exporting ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Send className="h-4 w-4 mr-1" />}
                 Send to NeoHive
+              </Button>
+              <Button variant="outline" size="sm" onClick={doSaveObsidian} disabled={savingObsidian}>
+                {savingObsidian ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <FolderDown className="h-4 w-4 mr-1" />}
+                Save to Obsidian
               </Button>
             </>
           )}
