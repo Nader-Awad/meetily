@@ -180,7 +180,11 @@ pub(crate) fn sanitize_filename(title: &str) -> String {
     // collapse internal whitespace runs to single spaces, trim ends
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed: String = collapsed.trim_matches('.').trim().chars().take(120).collect();
-    if trimmed.is_empty() { "meeting".to_string() } else { trimmed }
+    if trimmed.is_empty() || trimmed.chars().all(|c| c == '.' || c.is_whitespace()) {
+        "meeting".to_string()
+    } else {
+        trimmed
+    }
 }
 
 /// Builds (filename, file_contents) for a completed run. Frontmatter uses the
@@ -198,7 +202,10 @@ pub(crate) fn build_obsidian_note(
 
     let mut tags: Vec<String> = vec!["meeting".to_string(), "meetily".to_string()];
     for t in &cfg.tags {
-        if !t.trim().is_empty() && !tags.contains(t) { tags.push(t.clone()); }
+        let t = t.trim();
+        if !t.is_empty() && !tags.contains(&t.to_string()) {
+            tags.push(t.to_string());
+        }
     }
     let tags_yaml = tags.iter().map(|t| yaml_str(t)).collect::<Vec<_>>().join(", ");
 
@@ -425,6 +432,13 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_filename_falls_back_for_dot_and_whitespace_titles() {
+        assert_eq!(super::sanitize_filename(". . ."), "meeting");
+        assert_eq!(super::sanitize_filename(". . . . ."), "meeting");
+        assert_eq!(super::sanitize_filename("..a.."), "a");
+    }
+
+    #[test]
     fn build_obsidian_note_has_frontmatter_and_filename() {
         let cfg = ObsidianExportConfig { tags: vec!["planning".into()], ..Default::default() };
         let (filename, contents) = super::build_obsidian_note(&sample_run(), &sample_meeting(), &["Alice".into(), "Bob".into()], &cfg);
@@ -438,6 +452,17 @@ mod tests {
         assert!(contents.contains("\"planning\""));
         assert!(contents.contains("We planned Q3."));
         assert!(contents.starts_with("---\n"));
+    }
+
+    #[test]
+    fn build_obsidian_note_trims_and_dedups_config_tags() {
+        let cfg = ObsidianExportConfig { tags: vec![" planning ".into(), "meeting".into()], ..Default::default() };
+        let (_f, contents) = super::build_obsidian_note(&sample_run(), &sample_meeting(), &[], &cfg);
+        assert!(contents.contains("\"planning\""));
+        assert!(!contents.contains(" planning \""));
+        assert!(!contents.contains("\"meeting\", \"meetily\", \"meeting\""));
+        let meeting_tag_count = contents.matches("\"meeting\"").count();
+        assert_eq!(meeting_tag_count, 1);
     }
 
     #[test]
