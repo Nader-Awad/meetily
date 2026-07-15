@@ -197,7 +197,8 @@ impl MeetingsRepository {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT DISTINCT speaker FROM transcripts \
              WHERE meeting_id = ? AND speaker IS NOT NULL AND TRIM(speaker) != '' \
-             AND speaker NOT GLOB 'Speaker *' ORDER BY speaker",
+             AND speaker NOT GLOB 'Speaker *' AND speaker NOT IN ('mic', 'system') \
+             ORDER BY speaker",
         )
         .bind(meeting_id)
         .fetch_all(pool)

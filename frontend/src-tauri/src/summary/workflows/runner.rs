@@ -81,9 +81,10 @@ pub async fn run_workflow_background<R: tauri::Runtime>(
 
                     let obs = workflow.obsidian_config();
                     if obs.enabled && obs.auto_export {
+                        // `save_run_to_obsidian` already marks the run `failed` itself at
+                        // genuine filesystem-failure points; just log here.
                         if let Err(e) = crate::summary::workflows::commands::save_run_to_obsidian(&pool, &run_id).await {
                             tracing::warn!("Auto-save to Obsidian failed for run {}: {}", run_id, e);
-                            let _ = crate::summary::workflows::repository::WorkflowsRepository::set_run_obsidian_result(&pool, &run_id, "failed", None).await;
                         }
                     }
                 }
