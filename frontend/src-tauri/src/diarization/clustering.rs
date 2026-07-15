@@ -80,7 +80,15 @@ impl SpeakerClusterer {
 
     /// Seed the clusterer with a saved voice profile so returning speakers
     /// are recognized by name instead of getting an anonymous label.
+    ///
+    /// Seed ALL profiles before the first `assign()`: the shared-anisotropy
+    /// center is estimated once from the seeded set on the first assign, so a
+    /// profile added afterwards would be excluded from that estimate.
     pub fn seed_profile(&mut self, name: &str, centroid: Vec<f32>) {
+        debug_assert!(
+            !self.center_ready,
+            "seed_profile called after the anisotropy center was estimated; seed all profiles before the first assign()"
+        );
         self.clusters.push(SpeakerCluster {
             centroid,
             count: 0,
@@ -108,6 +116,14 @@ impl SpeakerClusterer {
     /// ordinary online clustering and — for a genuinely new voice — an anonymous
     /// "Speaker N" label, rather than being force-named by a weak raw match.
     /// With too few profiles the match uses the raw threshold (prior behavior).
+    ///
+    /// Known trade-off: the gate is re-evaluated per segment, so a returning
+    /// speaker whose FIRST segment is ambiguous may briefly land in a "Speaker N"
+    /// cluster before a later, cleaner segment adopts their profile name — one
+    /// person can then appear under both labels in a meeting. This is rare
+    /// (same-speaker segments are usually consistent) and locally fixable via
+    /// rename; we accept it rather than re-introduce a cross-cluster
+    /// re-attribution sweep (the source of an earlier oscillation bug).
     pub fn assign(&mut self, embedding: &[f32]) -> String {
         self.ensure_profile_center();
 
@@ -160,6 +176,11 @@ impl SpeakerClusterer {
     /// Lazily (once) estimate the shared anisotropy direction as the mean of the
     /// seeded profile centroids, when there are at least
     /// `MIN_PROFILES_FOR_CENTERING` of them. Memoized via `center_ready`.
+    ///
+    /// Estimated from the seeded profiles ONLY (not the meeting's live clusters),
+    /// deliberately: this keeps the center stable for the whole meeting so it can
+    /// be computed once. (The batch `ProfileMatcher` instead folds the meeting's
+    /// local centroids into its cohort, since it has them all up front.)
     fn ensure_profile_center(&mut self) {
         if self.center_ready {
             return;
@@ -198,6 +219,10 @@ impl SpeakerClusterer {
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let (best_idx, best) = *scored.first()?;
+        // If only one unmatched profile remains, runner_up defaults to 0.0
+        // (~the centered impostor median), so the gate reduces to the absolute
+        // `best >= THRESHOLD` bar — a strong bar in centered space. Mirrors the
+        // batch path's single-profile handling; don't "simplify" to -1.0/-inf.
         let runner_up = scored.get(1).map(|(_, s)| *s).unwrap_or(0.0);
         if best >= CENTERED_PROFILE_MATCH_THRESHOLD
             && (best - runner_up) >= CENTERED_PROFILE_MATCH_MARGIN
