@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
-import { ExportResult, WorkflowRun } from '@/types/workflow';
+import { ExportResult, ObsidianSaveResult, WorkflowRun } from '@/types/workflow';
 
 const POLL_MS = 5000;
 const MAX_POLLS = 200;
@@ -133,5 +133,18 @@ export function useWorkflowRuns(meetingId: string | undefined) {
     }
   }, [refresh]);
 
-  return { runs, isLoading, refresh, runWorkflow, cancelRun, exportRun, activeRunId };
+  const saveToObsidian = useCallback(async (runId: string): Promise<ObsidianSaveResult | null> => {
+    try {
+      const result = await invokeTauri<ObsidianSaveResult>('api_save_run_to_obsidian', { runId });
+      toast.success(`Saved to Obsidian: ${result.path}`);
+      await refresh();
+      return result;
+    } catch (err) {
+      console.error('Failed to save run to Obsidian:', err);
+      toast.error(`Obsidian save failed: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }, [refresh]);
+
+  return { runs, isLoading, refresh, runWorkflow, cancelRun, exportRun, saveToObsidian, activeRunId };
 }

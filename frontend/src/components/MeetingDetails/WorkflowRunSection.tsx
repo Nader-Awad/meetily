@@ -15,7 +15,7 @@ interface WorkflowRunSectionProps {
 
 export function WorkflowRunSection({ meetingId, transcriptText, summaryLanguage }: WorkflowRunSectionProps) {
   const { workflows } = useWorkflows();
-  const { runs, runWorkflow, cancelRun, exportRun } = useWorkflowRuns(meetingId);
+  const { runs, runWorkflow, cancelRun, exportRun, saveToObsidian } = useWorkflowRuns(meetingId);
 
   return (
     <div className="p-6 w-full space-y-3">
@@ -40,7 +40,7 @@ export function WorkflowRunSection({ meetingId, transcriptText, summaryLanguage 
 
       <div className="space-y-3">
         {runs.map((run) => (
-          <WorkflowRunCard key={run.id} run={run} onExport={exportRun} onCancel={cancelRun} />
+          <WorkflowRunCard key={run.id} run={run} onExport={exportRun} onCancel={cancelRun} onSaveToObsidian={saveToObsidian} />
         ))}
       </div>
     </div>
