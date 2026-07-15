@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.6.3 — 2026-07-15
+
+- **Speaker recognition remembers several samples per person, so it keeps
+  improving as you use it.** Previously each saved voice was a single averaged
+  fingerprint that drifted over time and could be spoiled by one mixed
+  recording. Now a voice stores multiple examples and a segment is matched to the
+  best-fitting one — more robust across different mics, rooms, and energy, and
+  re-tagging a person now *adds* an example instead of blurring the one you had.
+  Existing saved voices are carried over automatically (no re-training needed).
+- **"May clash" warnings for confusable voices.** Settings → Speaker
+  identification now flags any saved voice that looks too similar to another one
+  (a telltale sign a profile got contaminated by someone else's audio), so you
+  can review and re-record it. Runs entirely on-device.
+
 ## v0.6.2 — 2026-07-15
 
 - **Speaker recognition now tells people apart even with many saved voices.**
