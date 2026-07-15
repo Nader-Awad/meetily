@@ -9,7 +9,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ModelPicker } from './ModelPicker';
 import { useTemplates } from '@/hooks/meeting-details/useTemplates';
-import { NeoHiveExportConfig, Workflow, WorkflowInput } from '@/types/workflow';
+import { NeoHiveExportConfig, ObsidianExportConfig, DEFAULT_OBSIDIAN_EXPORT, Workflow, WorkflowInput } from '@/types/workflow';
 
 const DEFAULT_EXPORT: NeoHiveExportConfig = {
   enabled: false,
@@ -39,6 +39,12 @@ export function WorkflowEditor({ initial, onSave, onCancel }: WorkflowEditorProp
     }
     return DEFAULT_EXPORT;
   });
+  const [obsidianCfg, setObsidianCfg] = useState<ObsidianExportConfig>(() => {
+    if (initial?.obsidianExport) {
+      try { return JSON.parse(initial.obsidianExport) as ObsidianExportConfig; } catch { /* fall through */ }
+    }
+    return DEFAULT_OBSIDIAN_EXPORT;
+  });
 
   const canSave = Boolean(name.trim() && provider.trim() && model.trim() && templateId.trim());
 
@@ -56,6 +62,7 @@ export function WorkflowEditor({ initial, onSave, onCancel }: WorkflowEditorProp
       temperature: initial?.temperature ?? null,
       topP: initial?.topP ?? null,
       neohiveExport: exportCfg,
+      obsidianExport: obsidianCfg,
     };
     await onSave(input);
   };
@@ -117,6 +124,37 @@ export function WorkflowEditor({ initial, onSave, onCancel }: WorkflowEditorProp
             checked={exportCfg.autoExport}
             onCheckedChange={(v) => setExportCfg((c) => ({ ...c, autoExport: v }))}
           />
+        </div>
+      )}
+
+      <div className="flex items-center justify-between border-t pt-3">
+        <div>
+          <Label>Save summary to folder (Obsidian)</Label>
+          <p className="text-xs text-muted-foreground">Writes the run as a markdown note to your configured vault folder.</p>
+        </div>
+        <Switch
+          checked={obsidianCfg.enabled}
+          onCheckedChange={(v) => setObsidianCfg((c) => ({ ...c, enabled: v }))}
+        />
+      </div>
+
+      {obsidianCfg.enabled && (
+        <div className="space-y-3 pl-2">
+          <div className="flex items-center justify-between">
+            <Label className="text-sm">Auto-save when a run completes</Label>
+            <Switch
+              checked={obsidianCfg.autoExport}
+              onCheckedChange={(v) => setObsidianCfg((c) => ({ ...c, autoExport: v }))}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-sm">Subfolder (optional)</Label>
+            <Input
+              value={obsidianCfg.subfolder ?? ''}
+              onChange={(e) => setObsidianCfg((c) => ({ ...c, subfolder: e.target.value || null }))}
+              placeholder="e.g. Meeting Notes"
+            />
+          </div>
         </div>
       )}
 
