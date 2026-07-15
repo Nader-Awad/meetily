@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.1 — 2026-07-15
+
+- **Summarize meetings in new, focused ways.** Three new built-in workflow templates:
+  *Technical Decisions* (engineering/architecture decisions with rationale, alternatives,
+  and owners), *Action Items* (a clean, assignable task list), and *Comprehensive Meeting
+  Note* (a full, structured note suited for archiving).
+- **Save summaries to Obsidian.** Any workflow can now optionally write its result as a
+  markdown note — with YAML frontmatter (title, createdAt, date, attendees, tags, meetingId) —
+  into a vault folder you configure in Settings → Workflows. There's a manual "Save to
+  Obsidian" button on each run plus optional auto-save when a run completes. It sits alongside
+  the existing NeoHive export; a workflow can use either, both, or neither.
+
 ## v0.6.0 — 2026-07-14
 
 - **See which voices are saved.** Speaker Identification settings now shows an empty-state
