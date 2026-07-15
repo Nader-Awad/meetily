@@ -1,9 +1,10 @@
+use crate::database::models::MeetingModel;
 use crate::database::repositories::meeting::MeetingsRepository;
 use crate::database::repositories::setting::SettingsRepository;
 use crate::neohive::NeoHiveClient;
 use crate::state::AppState;
 use crate::summary::workflows::models::{
-    NeoHiveExportConfig, Workflow, WorkflowInput, WorkflowRun, WorkflowRunStatus,
+    NeoHiveExportConfig, ObsidianExportConfig, Workflow, WorkflowInput, WorkflowRun, WorkflowRunStatus,
 };
 use crate::summary::workflows::repository::WorkflowsRepository;
 use crate::summary::workflows::runner;
@@ -163,6 +164,59 @@ pub(crate) fn build_export_items(
             ],
         })
         .collect()
+}
+
+/// Double-quotes a string for a YAML scalar, escaping backslashes and quotes.
+fn yaml_str(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Strips filesystem-hostile characters; collapses whitespace; never empty.
+pub(crate) fn sanitize_filename(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') && !c.is_control())
+        .collect();
+    // collapse internal whitespace runs to single spaces, trim ends
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed: String = collapsed.trim_matches('.').trim().chars().take(120).collect();
+    if trimmed.is_empty() { "meeting".to_string() } else { trimmed }
+}
+
+/// Builds (filename, file_contents) for a completed run. Frontmatter uses the
+/// meeting's created_at for both `createdAt` (YYYY-MM-DD, matching the vault's
+/// standup convention) and `date` (RFC3339). `attendees` is omitted when empty.
+pub(crate) fn build_obsidian_note(
+    run: &WorkflowRun,
+    meeting: &MeetingModel,
+    attendees: &[String],
+    cfg: &ObsidianExportConfig,
+) -> (String, String) {
+    let created = meeting.created_at.0;
+    let day = created.format("%Y-%m-%d").to_string();
+    let filename = format!("{} - {}.md", day, sanitize_filename(&meeting.title));
+
+    let mut tags: Vec<String> = vec!["meeting".to_string(), "meetily".to_string()];
+    for t in &cfg.tags {
+        if !t.trim().is_empty() && !tags.contains(t) { tags.push(t.clone()); }
+    }
+    let tags_yaml = tags.iter().map(|t| yaml_str(t)).collect::<Vec<_>>().join(", ");
+
+    let mut fm = String::from("---\n");
+    fm.push_str(&format!("title: {}\n", yaml_str(&meeting.title)));
+    fm.push_str(&format!("createdAt: {}\n", day));
+    fm.push_str(&format!("date: {}\n", created.to_rfc3339()));
+    if !attendees.is_empty() {
+        let att = attendees.iter().map(|a| yaml_str(a)).collect::<Vec<_>>().join(", ");
+        fm.push_str(&format!("attendees: [{}]\n", att));
+    }
+    fm.push_str(&format!("tags: [{}]\n", tags_yaml));
+    fm.push_str(&format!("meetingId: {}\n", run.meeting_id));
+    fm.push_str("---\n\n");
+
+    let body = run.result_markdown.clone().unwrap_or_default();
+    let contents = format!("{}# {}\n\n{}\n", fm, meeting.title, body);
+    (filename, contents)
 }
 
 #[derive(Debug, Serialize)]
@@ -333,10 +387,64 @@ pub async fn api_save_obsidian_config(
 
 #[cfg(test)]
 mod tests {
-    use crate::summary::workflows::models::{NeoHiveExportConfig, WorkflowInput};
+    use crate::database::models::{MeetingModel, DateTimeUtc};
+    use crate::summary::workflows::models::{NeoHiveExportConfig, WorkflowInput, WorkflowRun};
+    use crate::summary::workflows::models::ObsidianExportConfig;
     use crate::summary::workflows::repository::WorkflowsRepository;
+    use chrono::TimeZone;
     use sqlx::sqlite::SqlitePoolOptions;
     use sqlx::SqlitePool;
+
+    fn sample_meeting() -> MeetingModel {
+        MeetingModel {
+            id: "m1".into(),
+            title: "Sprint Planning: Q3".into(),
+            created_at: DateTimeUtc(chrono::Utc.with_ymd_and_hms(2026, 7, 15, 14, 30, 0).unwrap()),
+            updated_at: DateTimeUtc(chrono::Utc.with_ymd_and_hms(2026, 7, 15, 15, 0, 0).unwrap()),
+            folder_path: None,
+        }
+    }
+
+    fn sample_run() -> WorkflowRun {
+        WorkflowRun {
+            id: "r1".into(), workflow_id: Some("w1".into()), workflow_name: "Comprehensive".into(),
+            meeting_id: "m1".into(), status: "completed".into(),
+            result_markdown: Some("## Overview\nWe planned Q3.".into()),
+            result_sections: None, error: None,
+            neohive_status: "none".into(), obsidian_status: "none".into(), obsidian_path: None,
+            created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn sanitize_filename_strips_illegal_and_never_empty() {
+        assert_eq!(super::sanitize_filename("a/b:c*?\"<>|d"), "abcd");
+        assert_eq!(super::sanitize_filename("../../etc/passwd"), "etcpasswd");
+        assert_eq!(super::sanitize_filename("   "), "meeting");
+        assert!(!super::sanitize_filename("normal title").is_empty());
+    }
+
+    #[test]
+    fn build_obsidian_note_has_frontmatter_and_filename() {
+        let cfg = ObsidianExportConfig { tags: vec!["planning".into()], ..Default::default() };
+        let (filename, contents) = super::build_obsidian_note(&sample_run(), &sample_meeting(), &["Alice".into(), "Bob".into()], &cfg);
+        assert_eq!(filename, "2026-07-15 - Sprint Planning Q3.md");
+        assert!(contents.contains("createdAt: 2026-07-15"));
+        assert!(contents.contains("title:"));
+        assert!(contents.contains("meetingId: m1"));
+        assert!(contents.contains("attendees: [\"Alice\", \"Bob\"]"));
+        assert!(contents.contains("\"meeting\""));
+        assert!(contents.contains("\"meetily\""));
+        assert!(contents.contains("\"planning\""));
+        assert!(contents.contains("We planned Q3."));
+        assert!(contents.starts_with("---\n"));
+    }
+
+    #[test]
+    fn build_obsidian_note_omits_attendees_when_empty() {
+        let (_f, contents) = super::build_obsidian_note(&sample_run(), &sample_meeting(), &[], &ObsidianExportConfig::default());
+        assert!(!contents.contains("attendees:"));
+    }
 
     #[test]
     fn neohive_status_label_maps_counts() {
