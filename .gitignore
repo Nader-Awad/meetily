@@ -83,3 +83,8 @@ target/
 /latest.json
 
 frontend/src-tauri/binaries/
+
+# Claude Code local settings + ephemeral worktrees/jobs
+.claude/settings.local.json
+.claude/worktrees/
+.claude/jobs/
