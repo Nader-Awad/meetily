@@ -12,6 +12,7 @@ import { SummaryModelSettings } from '@/components/SummaryModelSettings';
 import { BetaSettings } from '@/components/BetaSettings';
 import { WorkflowsSettings } from '@/components/workflows/WorkflowsSettings';
 import { SpeakerIdentificationSettings } from '@/components/SpeakerIdentificationSettings';
+import { VocabularySettings } from '@/components/settings/VocabularySettings';
 import { useConfig } from '@/contexts/ConfigContext';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 
@@ -124,6 +125,7 @@ export default function SettingsPage() {
                 setTranscriptModelConfig={setTranscriptModelConfig}
               />
               <SpeakerIdentificationSettings />
+              <VocabularySettings />
             </TabsContent>
             <TabsContent value="summaryModels">
               <SummaryModelSettings />
