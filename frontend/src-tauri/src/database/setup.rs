@@ -30,6 +30,19 @@ pub async fn initialize_database_on_startup(app: &AppHandle) -> Result<(), Strin
             .await
             .map_err(|e| format!("Failed to initialize database manager: {}", e))?;
 
+        // Hydrate the custom-vocabulary hot-path global from the DB now that the pool
+        // exists and migrations have run. Without this, a fresh app process that goes
+        // straight to a batch path (audio import / retranscribe) instead of live
+        // recording would never populate VOCABULARY_CONFIG, silently no-op'ing Whisper
+        // term-biasing (Layer 2). Use the pool directly rather than app.state::<AppState>()
+        // since this runs inside `setup()`, synchronously, before any command is invokable.
+        let vocab_cfg = crate::database::repositories::setting::SettingsRepository::get_vocabulary_config(db_manager.pool())
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        crate::set_vocabulary_config_internal(vocab_cfg);
+
         app.manage(AppState { db_manager });
         info!("Database initialized successfully");
     }

@@ -160,6 +160,16 @@ pub async fn import_and_initialize_database(
             format!("Failed to import database: {}", e)
         })?;
 
+    // Hydrate the custom-vocabulary hot-path global now that the pool exists (see
+    // database/setup.rs for the full rationale). This is the first-launch/legacy-import
+    // pool-creation point, distinct from the normal-launch path in setup.rs.
+    let vocab_cfg = crate::database::repositories::setting::SettingsRepository::get_vocabulary_config(db_manager.pool())
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    crate::set_vocabulary_config_internal(vocab_cfg);
+
     // Update app state with the new manager
     app.manage(AppState { db_manager });
 
@@ -189,7 +199,18 @@ pub async fn initialize_fresh_database(app: AppHandle) -> Result<(), String> {
 
     // Set default model configuration for fresh installs
     let pool = db_manager.pool();
-    
+
+    // Hydrate the custom-vocabulary hot-path global now that the pool exists (see
+    // database/setup.rs for the full rationale). A fresh install has no vocabulary
+    // config yet, so this resolves to the default, but keeps the global consistent
+    // with the DB-backed source of truth rather than relying on the process default.
+    let vocab_cfg = crate::database::repositories::setting::SettingsRepository::get_vocabulary_config(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    crate::set_vocabulary_config_internal(vocab_cfg);
+
     let default_summary_model = crate::summary::summary_engine::commands::get_recommended_summary_model_for_current_system()
         .unwrap_or("qwen3.5:2b");
 
