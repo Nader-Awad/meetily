@@ -64,7 +64,7 @@ impl VocabularyConfig {
         }
         self.entries
             .iter()
-            .filter(|e| e.enabled && e.entry_type == "correction" && !e.text.is_empty())
+            .filter(|e| e.enabled && e.entry_type == "correction" && !e.text.trim().is_empty())
             .filter_map(|e| {
                 e.replacement.as_ref().map(|r| Correction {
                     from: e.text.clone(),
@@ -95,7 +95,7 @@ impl VocabularyConfig {
         }
         self.entries
             .iter()
-            .filter(|e| e.enabled)
+            .filter(|e| e.enabled && !e.text.trim().is_empty())
             .filter_map(|e| {
                 e.description
                     .as_ref()
@@ -147,7 +147,11 @@ fn replace_whole_word(haystack: &str, from: &str, to: &str, case_sensitive: bool
     out
 }
 
-/// Apply every correction in order to `text`.
+/// Apply every correction in order to `text`. Corrections are applied
+/// sequentially against the accumulating result (not the original input), so
+/// a later correction can re-match text produced by an earlier one. This is
+/// intentional cascading behavior, not a bug — do not "fix" it by applying
+/// corrections independently against the original `text`.
 pub fn apply_corrections(text: &str, corrections: &[Correction]) -> String {
     let mut result = text.to_string();
     for c in corrections {
@@ -248,6 +252,14 @@ mod tests {
     }
 
     #[test]
+    fn apply_corrections_cascades_across_entries() {
+        // Intentional: corrections apply sequentially against the accumulating
+        // result, so a later correction can re-match an earlier one's output.
+        let c = vec![corr("x", "y", false), corr("y", "z", false)];
+        assert_eq!(apply_corrections("x", &c), "z");
+    }
+
+    #[test]
     fn whisper_prompt_joins_and_clips() {
         let terms = vec!["Snyk".to_string(), "NeoHive".to_string(), "Logilica".to_string()];
         assert_eq!(build_whisper_prompt(&terms, 100), "Snyk, NeoHive, Logilica");
@@ -268,6 +280,30 @@ mod tests {
         let g = build_glossary(&e, 1000);
         assert!(g.contains("Glossary of domain terms"));
         assert!(g.contains("- Snyk: SAST company"));
+    }
+
+    #[test]
+    fn glossary_clips_at_line_boundary() {
+        let header = "Glossary of domain terms (use these exact spellings; do not confuse them):\n";
+        let entries = vec![
+            ("Term1".to_string(), "Desc1".to_string()),
+            ("Term2".to_string(), "Desc2".to_string()),
+        ];
+        let line1 = format!("- {}: {}\n", "Term1", "Desc1");
+        // Exactly enough room for header + first line, not the second.
+        let max_chars = header.chars().count() + line1.chars().count();
+        let g = build_glossary(&entries, max_chars);
+        assert!(g.contains("Term1"));
+        assert!(!g.contains("Term2"));
+    }
+
+    #[test]
+    fn glossary_returns_empty_when_only_header_fits() {
+        let header = "Glossary of domain terms (use these exact spellings; do not confuse them):\n";
+        let entries = vec![("Term1".to_string(), "Desc1".to_string())];
+        // Room for the header alone, but not header + first line.
+        let max_chars = header.chars().count();
+        assert_eq!(build_glossary(&entries, max_chars), "");
     }
 
     #[test]
@@ -294,6 +330,34 @@ mod tests {
     }
 
     #[test]
+    fn corrections_excludes_whitespace_only_text() {
+        let json = r#"{
+          "enabled": true,
+          "entries": [
+            {"id":"1","entryType":"correction","text":"   ","replacement":"X","enabled":true}
+          ]
+        }"#;
+        let cfg: VocabularyConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.corrections().is_empty());
+        assert_eq!(
+            apply_corrections("some   text here", &cfg.corrections()),
+            "some   text here"
+        );
+    }
+
+    #[test]
+    fn glossary_entries_excludes_whitespace_only_text() {
+        let json = r#"{
+          "enabled": true,
+          "entries": [
+            {"id":"1","entryType":"term","text":"   ","description":"desc","enabled":true}
+          ]
+        }"#;
+        let cfg: VocabularyConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.glossary_entries().is_empty());
+    }
+
+    #[test]
     fn config_serde_round_trips_camel_case() {
         let cfg = VocabularyConfig {
             enabled: true,
@@ -305,15 +369,19 @@ mod tests {
                 description: None,
                 case_sensitive: false,
                 enabled: true,
-                created_at: None,
-                updated_at: None,
+                created_at: Some("2024-01-01T00:00:00Z".into()),
+                updated_at: Some("2024-01-02T00:00:00Z".into()),
             }],
         };
         let s = serde_json::to_string(&cfg).unwrap();
         assert!(s.contains("\"entryType\""));
         assert!(s.contains("\"caseSensitive\""));
+        assert!(s.contains("\"createdAt\""));
+        assert!(s.contains("\"updatedAt\""));
         let back: VocabularyConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.entries.len(), 1);
         assert_eq!(back.entries[0].entry_type, "correction");
+        assert_eq!(back.entries[0].created_at, Some("2024-01-01T00:00:00Z".to_string()));
+        assert_eq!(back.entries[0].updated_at, Some("2024-01-02T00:00:00Z".to_string()));
     }
 }
