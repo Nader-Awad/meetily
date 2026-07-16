@@ -567,6 +567,15 @@ impl WhisperEngine {
         params.set_max_len(200);
         params.set_single_segment(false);
 
+        // Bias recognition toward the user's custom vocabulary terms (Whisper only).
+        let vocab_prompt = crate::vocabulary::build_whisper_prompt(
+            &crate::get_vocabulary_config_internal().term_texts(),
+            600,
+        );
+        if !vocab_prompt.is_empty() {
+            params.set_initial_prompt(&vocab_prompt);
+        }
+
         // Set thread count based on hardware (if supported by whisper.cpp)
         if let Some(_max_threads) = adaptive_config.max_threads {
             // Note: whisper.cpp may or may not expose thread control through params
@@ -683,6 +692,15 @@ impl WhisperEngine {
         // Reasonable length limits
         params.set_max_len(200);                 // Reasonable length
         params.set_single_segment(false);        // Allow multiple segments for better accuracy
+
+        // Bias recognition toward the user's custom vocabulary terms (Whisper only).
+        let vocab_prompt = crate::vocabulary::build_whisper_prompt(
+            &crate::get_vocabulary_config_internal().term_texts(),
+            600,
+        );
+        if !vocab_prompt.is_empty() {
+            params.set_initial_prompt(&vocab_prompt);
+        }
 
         // Note: compression_ratio_threshold would be ideal but not available in current whisper-rs
         // This would help detect repetitive outputs: params.set_compression_ratio_threshold(2.4);
