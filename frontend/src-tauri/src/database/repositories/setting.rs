@@ -1,5 +1,6 @@
 use crate::database::models::{Setting, TranscriptSetting};
 use crate::summary::CustomOpenAIConfig;
+use crate::vocabulary::VocabularyConfig;
 use sqlx::SqlitePool;
 
 #[derive(serde::Deserialize, Debug)]
@@ -353,6 +354,82 @@ impl SettingsRepository {
             "#,
         )
         .bind(&config.model)
+        .bind(config_json)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    // ===== CUSTOM VOCABULARY CONFIG METHODS =====
+
+    /// Gets the custom vocabulary configuration from JSON
+    ///
+    /// # Returns
+    /// * `Ok(Some(VocabularyConfig))` - Config exists and is valid JSON
+    /// * `Ok(None)` - No config stored
+    /// * `Err(sqlx::Error)` - Database error
+    pub async fn get_vocabulary_config(
+        pool: &SqlitePool,
+    ) -> std::result::Result<Option<VocabularyConfig>, sqlx::Error> {
+        use sqlx::Row;
+
+        let row = sqlx::query(
+            r#"
+            SELECT vocabularyConfig
+            FROM settings
+            WHERE id = '1'
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(pool)
+        .await?;
+
+        match row {
+            Some(record) => {
+                let config_json: Option<String> = record.get("vocabularyConfig");
+
+                if let Some(json) = config_json {
+                    let config: VocabularyConfig = serde_json::from_str(&json).map_err(|e| {
+                        sqlx::Error::Protocol(
+                            format!("Invalid JSON in vocabularyConfig: {}", e).into(),
+                        )
+                    })?;
+
+                    Ok(Some(config))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Saves the custom vocabulary configuration as JSON
+    ///
+    /// # Arguments
+    /// * `pool` - Database connection pool
+    /// * `config` - VocabularyConfig to save
+    ///
+    /// # Returns
+    /// * `Ok(())` - Config saved successfully
+    /// * `Err(sqlx::Error)` - Database or JSON serialization error
+    pub async fn save_vocabulary_config(
+        pool: &SqlitePool,
+        config: &VocabularyConfig,
+    ) -> std::result::Result<(), sqlx::Error> {
+        let config_json = serde_json::to_string(config).map_err(|e| {
+            sqlx::Error::Protocol(format!("Failed to serialize vocabularyConfig: {}", e).into())
+        })?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO settings (id, provider, model, whisperModel, vocabularyConfig)
+            VALUES ('1', 'openrouter', '', 'large-v3', $1)
+            ON CONFLICT(id) DO UPDATE SET
+                vocabularyConfig = excluded.vocabularyConfig
+            "#,
+        )
         .bind(config_json)
         .execute(pool)
         .await?;

@@ -65,11 +65,17 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::RwLock;
 
+use crate::vocabulary::VocabularyConfig;
+
 static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
 
 // Global language preference storage (default to "auto-translate" for automatic translation to English)
 static LANGUAGE_PREFERENCE: std::sync::LazyLock<StdMutex<String>> =
     std::sync::LazyLock::new(|| StdMutex::new("auto-translate".to_string()));
+
+// Global custom vocabulary config storage (hot-path global read by live recording + Whisper)
+static VOCABULARY_CONFIG: std::sync::LazyLock<StdMutex<VocabularyConfig>> =
+    std::sync::LazyLock::new(|| StdMutex::new(VocabularyConfig::default()));
 
 #[derive(Debug, Deserialize)]
 struct RecordingArgs {
@@ -390,6 +396,21 @@ pub fn get_language_preference_internal() -> Option<String> {
     LANGUAGE_PREFERENCE.lock().ok().map(|lang| lang.clone())
 }
 
+// Internal helper function to get the custom vocabulary config (for use within Rust code)
+pub fn get_vocabulary_config_internal() -> VocabularyConfig {
+    VOCABULARY_CONFIG
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+// Internal helper function to set the custom vocabulary config (for use within Rust code)
+pub fn set_vocabulary_config_internal(config: VocabularyConfig) {
+    if let Ok(mut g) = VOCABULARY_CONFIG.lock() {
+        *g = config;
+    }
+}
+
 pub fn run() {
     log::set_max_level(log::LevelFilter::Info);
 
@@ -660,6 +681,9 @@ pub fn run() {
             api::api_save_custom_openai_config,
             api::api_get_custom_openai_config,
             api::api_test_custom_openai_connection,
+            // Custom vocabulary commands
+            api::api_get_vocabulary_config,
+            api::api_save_vocabulary_config,
             // Summary commands
             summary::commands::api_process_transcript,
             summary::commands::api_get_summary,

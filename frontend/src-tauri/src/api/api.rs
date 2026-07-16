@@ -14,6 +14,7 @@ use crate::{
     },
     state::AppState,
     summary::CustomOpenAIConfig,
+    vocabulary::VocabularyConfig,
 };
 
 // Hardcoded server URL
@@ -1275,6 +1276,51 @@ pub async fn api_get_custom_openai_config<R: Runtime>(
         Err(e) => {
             log_error!("❌ Failed to get custom OpenAI config: {}", e);
             Err(format!("Failed to get custom OpenAI configuration: {}", e))
+        }
+    }
+}
+
+// ===== CUSTOM VOCABULARY API COMMANDS =====
+
+/// Gets the custom vocabulary configuration
+#[tauri::command]
+pub async fn api_get_vocabulary_config<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<VocabularyConfig>, String> {
+    log_info!("api_get_vocabulary_config called");
+
+    let pool = state.db_manager.pool();
+
+    match SettingsRepository::get_vocabulary_config(pool).await {
+        Ok(config) => Ok(config),
+        Err(e) => {
+            log_error!("❌ Failed to get vocabulary config: {}", e);
+            Err(format!("Failed to get vocabulary config: {}", e))
+        }
+    }
+}
+
+/// Saves the custom vocabulary configuration
+#[tauri::command]
+pub async fn api_save_vocabulary_config<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    config: VocabularyConfig,
+) -> Result<(), String> {
+    log_info!("api_save_vocabulary_config called");
+
+    let pool = state.db_manager.pool();
+
+    match SettingsRepository::save_vocabulary_config(pool, &config).await {
+        Ok(()) => {
+            // Refresh the hot-path global so live recording + Whisper pick it up immediately.
+            crate::set_vocabulary_config_internal(config);
+            Ok(())
+        }
+        Err(e) => {
+            log_error!("❌ Failed to save vocabulary config: {}", e);
+            Err(format!("Failed to save vocabulary config: {}", e))
         }
     }
 }
