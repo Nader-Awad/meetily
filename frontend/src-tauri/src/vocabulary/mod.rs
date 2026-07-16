@@ -205,6 +205,20 @@ pub fn build_glossary(entries: &[(String, String)], max_chars: usize) -> String 
     body
 }
 
+/// Prepend a glossary (built from `entries`) to `custom_prompt`. Returns the
+/// prompt unchanged when there are no described terms; returns the glossary
+/// alone when `custom_prompt` is blank.
+pub fn prepend_glossary(custom_prompt: String, entries: &[(String, String)], max_chars: usize) -> String {
+    let glossary = build_glossary(entries, max_chars);
+    if glossary.is_empty() {
+        custom_prompt
+    } else if custom_prompt.trim().is_empty() {
+        glossary
+    } else {
+        format!("{}\n\n{}", glossary, custom_prompt)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +318,31 @@ mod tests {
         // Room for the header alone, but not header + first line.
         let max_chars = header.chars().count();
         assert_eq!(build_glossary(&entries, max_chars), "");
+    }
+
+    #[test]
+    fn prepend_glossary_returns_prompt_unchanged_when_no_described_terms() {
+        assert_eq!(prepend_glossary("keep this prompt".to_string(), &[], 2000), "keep this prompt");
+    }
+
+    #[test]
+    fn prepend_glossary_returns_glossary_only_when_prompt_blank() {
+        let entries = vec![("Snyk".to_string(), "SAST company".to_string())];
+        let result = prepend_glossary("   ".to_string(), &entries, 2000);
+        assert!(result.starts_with("Glossary of domain terms"));
+        assert!(result.contains("- Snyk: SAST company"));
+    }
+
+    #[test]
+    fn prepend_glossary_combines_glossary_and_prompt_glossary_first() {
+        let entries = vec![("Snyk".to_string(), "SAST company".to_string())];
+        let result = prepend_glossary("Focus on action items.".to_string(), &entries, 2000);
+        assert!(result.contains("Glossary of domain terms"));
+        assert!(result.contains("- Snyk: SAST company"));
+        assert!(result.contains("Focus on action items."));
+        let glossary_pos = result.find("Glossary of domain terms").unwrap();
+        let prompt_pos = result.find("Focus on action items.").unwrap();
+        assert!(glossary_pos < prompt_pos);
     }
 
     #[test]

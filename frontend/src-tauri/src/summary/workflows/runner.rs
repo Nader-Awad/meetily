@@ -135,6 +135,8 @@ async fn generate_for_workflow<R: tauri::Runtime>(
     let app_data_dir: Option<PathBuf> = app.path().app_data_dir().ok();
 
     let custom_prompt = workflow.custom_prompt.clone().unwrap_or_default();
+    let vocab_cfg = SettingsRepository::get_vocabulary_config(pool).await.ok().flatten().unwrap_or_default();
+    let custom_prompt = crate::vocabulary::prepend_glossary(custom_prompt, &vocab_cfg.glossary_entries(), 2000);
     let client = Client::new();
 
     let detected_transcript_language: Option<&str> = None; // Auto path; language detection handled elsewhere

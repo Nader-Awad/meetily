@@ -504,6 +504,9 @@ impl SummaryService {
             }),
         };
 
+        let vocab_cfg = SettingsRepository::get_vocabulary_config(&pool).await.ok().flatten().unwrap_or_default();
+        let custom_prompt = crate::vocabulary::prepend_glossary(custom_prompt, &vocab_cfg.glossary_entries(), 2000);
+
         let client = reqwest::Client::new();
         let result = generate_meeting_summary(
             &client,
