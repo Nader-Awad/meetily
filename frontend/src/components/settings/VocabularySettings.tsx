@@ -109,11 +109,11 @@ export function VocabularySettings() {
             {e.entryType === 'correction' && (
               <div className="flex items-center gap-1">
                 <Label className="text-xs">Aa</Label>
-                <Switch checked={e.caseSensitive} onCheckedChange={(v) => update(e.id, { caseSensitive: v })} />
+                <Switch checked={e.caseSensitive} onCheckedChange={(v) => update(e.id, { caseSensitive: v })} aria-label="Case sensitive" />
               </div>
             )}
-            <Switch checked={e.enabled} onCheckedChange={(v) => update(e.id, { enabled: v })} />
-            <Button variant="ghost" size="icon" onClick={() => remove(e.id)}><Trash2 className="h-4 w-4" /></Button>
+            <Switch checked={e.enabled} onCheckedChange={(v) => update(e.id, { enabled: v })} aria-label="Entry enabled" />
+            <Button variant="ghost" size="icon" onClick={() => remove(e.id)} aria-label="Delete entry" title="Delete entry"><Trash2 className="h-4 w-4" /></Button>
           </div>
         ))}
 
