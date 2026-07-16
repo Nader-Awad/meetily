@@ -3,6 +3,7 @@
 // Slim Tauri command layer for recording functionality.
 // Delegates to transcription and recording modules for actual implementation.
 
+use crate::state::AppState;
 use anyhow::Result;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -250,6 +251,16 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     drop(engine_lifecycle_guard);
     reset_speech_detected_flag(); // Reset for new recording session
 
+    // Refresh the vocabulary global from the DB so the live path (+ Whisper) is
+    // current for this recording session, even if the app was restarted since
+    // the last save (api_save_vocabulary_config already refreshes it on edits).
+    if let Some(app_state) = app.try_state::<AppState>() {
+        let pool = app_state.db_manager.pool();
+        if let Ok(cfg) = crate::database::repositories::setting::SettingsRepository::get_vocabulary_config(pool).await {
+            crate::set_vocabulary_config_internal(cfg.unwrap_or_default());
+        }
+    }
+
     // Start optimized parallel transcription task and store handle
     let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
     {
@@ -421,6 +432,16 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     IS_RECORDING.store(true, Ordering::SeqCst);
     drop(engine_lifecycle_guard);
     reset_speech_detected_flag(); // Reset for new recording session
+
+    // Refresh the vocabulary global from the DB so the live path (+ Whisper) is
+    // current for this recording session, even if the app was restarted since
+    // the last save (api_save_vocabulary_config already refreshes it on edits).
+    if let Some(app_state) = app.try_state::<AppState>() {
+        let pool = app_state.db_manager.pool();
+        if let Ok(cfg) = crate::database::repositories::setting::SettingsRepository::get_vocabulary_config(pool).await {
+            crate::set_vocabulary_config_internal(cfg.unwrap_or_default());
+        }
+    }
 
     // Start optimized parallel transcription task and store handle
     let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);

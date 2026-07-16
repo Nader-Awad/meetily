@@ -620,13 +620,24 @@ async fn run_retranscription<R: Runtime>(
 
     emit_progress(&app, &meeting_id, "saving", 80, "Saving transcripts...");
 
-    // Create transcript segments with proper timestamps from VAD
-    let segments = create_transcript_segments(&all_transcripts);
-
     // Save to database
     let app_state = app
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("App state not available"))?;
+
+    // Create transcript segments with proper timestamps from VAD, applying the
+    // custom vocabulary correction dictionary (authoritative DB copy, since this
+    // is a batch/offline path).
+    let corrections = {
+        let pool = app_state.db_manager.pool();
+        crate::database::repositories::setting::SettingsRepository::get_vocabulary_config(pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .corrections()
+    };
+    let segments = create_transcript_segments(&all_transcripts, &corrections);
 
     // Wrap delete+insert+update in a transaction to prevent data loss
     let pool = app_state.db_manager.pool();
@@ -1049,7 +1060,7 @@ mod tests {
     #[test]
     fn test_create_transcript_segments_empty() {
         let transcripts: Vec<(String, f64, f64, Option<String>)> = vec![];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, &[]);
         assert!(segments.is_empty());
     }
 
@@ -1058,7 +1069,7 @@ mod tests {
         let transcripts = vec![
             ("Hello world".to_string(), 0.0, 1500.0, None), // 0-1.5 seconds
         ];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, &[]);
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "Hello world");
@@ -1075,7 +1086,7 @@ mod tests {
             ("Second segment".to_string(), 3000.0, 5000.0, None),  // 3-5 seconds
             ("Third segment".to_string(), 6500.0, 8000.0, None),   // 6.5-8 seconds
         ];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, &[]);
 
         assert_eq!(segments.len(), 3);
 
@@ -1103,7 +1114,7 @@ mod tests {
         let transcripts = vec![
             ("  Hello with spaces  ".to_string(), 0.0, 1000.0, None),
         ];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, &[]);
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "Hello with spaces");
@@ -1115,7 +1126,7 @@ mod tests {
             ("Segment one".to_string(), 0.0, 1000.0, None),
             ("Segment two".to_string(), 1000.0, 2000.0, None),
         ];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, &[]);
 
         assert_eq!(segments.len(), 2);
         assert_ne!(segments[0].id, segments[1].id);
@@ -1129,7 +1140,7 @@ mod tests {
             ("Hi".to_string(), 0.0, 1000.0, Some("Speaker 1".to_string())),
             ("Bye".to_string(), 1000.0, 2000.0, None),
         ];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, &[]);
         assert_eq!(segments[0].speaker.as_deref(), Some("Speaker 1"));
         assert_eq!(segments[1].speaker, None);
     }

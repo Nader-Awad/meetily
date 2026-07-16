@@ -48,7 +48,10 @@ pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
 
 /// Create transcript segments from transcription results.
 /// Each tuple is (text, start_ms, end_ms, speaker) from VAD timestamps + optional diarization label.
-pub(crate) fn create_transcript_segments(transcripts: &[(String, f64, f64, Option<String>)]) -> Vec<TranscriptSegment> {
+pub(crate) fn create_transcript_segments(
+    transcripts: &[(String, f64, f64, Option<String>)],
+    corrections: &[crate::vocabulary::Correction],
+) -> Vec<TranscriptSegment> {
     transcripts
         .iter()
         .map(|(text, start_ms, end_ms, speaker)| {
@@ -58,7 +61,7 @@ pub(crate) fn create_transcript_segments(transcripts: &[(String, f64, f64, Optio
 
             TranscriptSegment {
                 id: format!("transcript-{}", Uuid::new_v4()),
-                text: text.trim().to_string(),
+                text: crate::vocabulary::apply_corrections(text.trim(), corrections),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 audio_start_time: Some(start_seconds),
                 audio_end_time: Some(end_seconds),

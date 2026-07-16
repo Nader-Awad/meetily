@@ -274,6 +274,13 @@ pub fn start_transcription_task<R: Runtime>(
 
                                         // Emit transcript update with NEW recording-relative timestamps
 
+                                        // Apply the custom vocabulary correction dictionary using the
+                                        // hot-path global (per-chunk; no DB access on the live path).
+                                        let transcript = {
+                                            let cfg = crate::get_vocabulary_config_internal();
+                                            crate::vocabulary::apply_corrections(&transcript, &cfg.corrections())
+                                        };
+
                                         let update = TranscriptUpdate {
                                             text: transcript,
                                             timestamp: format_current_timestamp(), // Wall-clock for reference

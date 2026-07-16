@@ -832,13 +832,23 @@ async fn run_import<R: Runtime>(
 
     emit_progress(&app, "saving", 85, "Creating meeting...");
 
-    // Create transcript segments
-    let segments = create_transcript_segments(&all_transcripts);
-
     // Save to database
     let app_state = app
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("App state not available"))?;
+
+    // Create transcript segments, applying the custom vocabulary correction
+    // dictionary (authoritative DB copy, since this is a batch/offline path).
+    let corrections = {
+        let pool = app_state.db_manager.pool();
+        crate::database::repositories::setting::SettingsRepository::get_vocabulary_config(pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .corrections()
+    };
+    let segments = create_transcript_segments(&all_transcripts, &corrections);
 
     let meeting_id = create_meeting_with_transcripts(
         app_state.db_manager.pool(),
@@ -1230,14 +1240,14 @@ mod tests {
     #[test]
     fn test_create_transcript_segments_empty() {
         let transcripts: Vec<(String, f64, f64, Option<String>)> = vec![];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, &[]);
         assert!(segments.is_empty());
     }
 
     #[test]
     fn test_create_transcript_segments_single() {
         let transcripts = vec![("Hello world".to_string(), 0.0, 1500.0, None)];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, &[]);
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "Hello world");
