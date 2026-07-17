@@ -102,6 +102,8 @@ pub struct TranscriptConfig {
     pub model: String,
     #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -634,10 +636,22 @@ pub async fn api_get_transcript_config<R: Runtime>(
             match SettingsRepository::get_transcript_api_key(pool, &config.provider).await {
                 Ok(api_key) => {
                     log_info!("Successfully retrieved transcript config and API key.");
+                    let base_url = crate::audio::transcription::cloud_provider::preset_base_url(
+                        &config.provider,
+                    )
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        if config.provider == "custom" {
+                            config.transcript_base_url.clone()
+                        } else {
+                            None
+                        }
+                    });
                     Ok(Some(TranscriptConfig {
                         provider: config.provider,
                         model: config.model,
                         api_key,
+                        base_url,
                     }))
                 }
                 Err(e) => {
@@ -656,6 +670,7 @@ pub async fn api_get_transcript_config<R: Runtime>(
                 provider: "parakeet".to_string(),
                 model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                 api_key: None,
+                base_url: None,
             }))
         }
         Err(e) => {
@@ -672,6 +687,7 @@ pub async fn api_save_transcript_config<R: Runtime>(
     provider: String,
     model: String,
     api_key: Option<String>,
+    base_url: Option<String>,
     _auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     log_info!(
@@ -692,6 +708,18 @@ pub async fn api_save_transcript_config<R: Runtime>(
             {
                 log_error!("Failed to save transcript API key: {}", e);
                 return Err(e.to_string());
+            }
+        }
+    }
+
+    if provider == "custom" {
+        if let Some(url) = base_url {
+            if !url.is_empty() {
+                log_info!("Base URL provided, saving for custom transcript provider...");
+                if let Err(e) = SettingsRepository::save_transcript_base_url(pool, &url).await {
+                    log_error!("Failed to save transcript base URL: {}", e);
+                    return Err(e.to_string());
+                }
             }
         }
     }

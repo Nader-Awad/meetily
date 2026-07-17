@@ -199,6 +199,8 @@ impl SettingsRepository {
             "elevenLabs" => "elevenLabsApiKey",
             "groq" => "groqApiKey",
             "openai" => "openaiApiKey",
+            "openrouter" => "openrouterApiKey",
+            "custom" => "customApiKey",
             _ => {
                 return Err(sqlx::Error::Protocol(
                     format!("Invalid provider: {}", provider).into(),
@@ -231,6 +233,8 @@ impl SettingsRepository {
             "elevenLabs" => "elevenLabsApiKey",
             "groq" => "groqApiKey",
             "openai" => "openaiApiKey",
+            "openrouter" => "openrouterApiKey",
+            "custom" => "customApiKey",
             _ => {
                 return Err(sqlx::Error::Protocol(
                     format!("Invalid provider: {}", provider).into(),
@@ -244,6 +248,25 @@ impl SettingsRepository {
         );
         let api_key = sqlx::query_scalar(&query).fetch_optional(pool).await?;
         Ok(api_key)
+    }
+
+    pub async fn save_transcript_base_url(
+        pool: &SqlitePool,
+        base_url: &str,
+    ) -> std::result::Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO transcript_settings (id, provider, model, transcriptBaseUrl)
+            VALUES ('1', 'custom', '', $1)
+            ON CONFLICT(id) DO UPDATE SET
+                transcriptBaseUrl = excluded.transcriptBaseUrl
+            "#,
+        )
+        .bind(base_url)
+        .execute(pool)
+        .await?;
+
+        Ok(())
     }
 
     pub async fn delete_api_key(

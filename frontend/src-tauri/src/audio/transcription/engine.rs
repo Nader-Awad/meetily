@@ -74,6 +74,7 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
                 provider: "parakeet".to_string(),
                 model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                 api_key: None,
+                base_url: None,
             }
         }
         Err(e) => {
@@ -82,6 +83,7 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
                 provider: "parakeet".to_string(),
                 model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                 api_key: None,
+                base_url: None,
             }
         }
     };
@@ -170,6 +172,7 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 provider: "parakeet".to_string(),
                 model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                 api_key: None,
+                base_url: None,
             }
         }
         Err(e) => {
@@ -178,6 +181,7 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 provider: "parakeet".to_string(),
                 model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
                 api_key: None,
+                base_url: None,
             }
         }
     };
