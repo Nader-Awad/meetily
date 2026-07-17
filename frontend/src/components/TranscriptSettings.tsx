@@ -30,15 +30,17 @@ export interface TranscriptSettingsProps {
     transcriptModelConfig: TranscriptModelProps;
     setTranscriptModelConfig: (config: TranscriptModelProps) => void;
     onModelSelect?: () => void;
+    onSave?: (config: TranscriptModelProps) => void | Promise<void>;
 }
 
-export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelConfig, onModelSelect }: TranscriptSettingsProps) {
+export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelConfig, onModelSelect, onSave }: TranscriptSettingsProps) {
     const [apiKey, setApiKey] = useState<string | null>(transcriptModelConfig.apiKey || null);
     const [baseUrl, setBaseUrl] = useState<string | null>(transcriptModelConfig.baseUrl ?? null);
     const [showApiKey, setShowApiKey] = useState<boolean>(false);
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
+    const [isSaving, setIsSaving] = useState<boolean>(false);
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
@@ -73,7 +75,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             }
         }
     };
-    const modelOptions = {
+    const modelOptions: Record<TranscriptModelProps['provider'], string[]> = {
         localWhisper: [], // Model selection handled by ModelManager component
         parakeet: [], // Model selection handled by ParakeetModelManager component
         deepgram: ['nova-2-phonecall'],
@@ -83,8 +85,14 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         openrouter: ['openai/whisper-large-v3', 'deepgram/nova-3', 'mistralai/voxtral-mini-transcribe-2602'],
         custom: [], // Free-text model name for OpenAI-compatible custom endpoints
     };
-    const requiresApiKey = transcriptModelConfig.provider === 'deepgram' || transcriptModelConfig.provider === 'elevenLabs' || transcriptModelConfig.provider === 'openai' || transcriptModelConfig.provider === 'groq' || transcriptModelConfig.provider === 'openrouter' || transcriptModelConfig.provider === 'custom';
+    const requiresApiKey = uiProvider === 'deepgram' || uiProvider === 'elevenLabs' || uiProvider === 'openai' || uiProvider === 'groq' || uiProvider === 'openrouter' || uiProvider === 'custom';
     const isCloudProvider = uiProvider !== 'localWhisper' && uiProvider !== 'parakeet';
+    // Model is only "ready to save" once it belongs to the currently selected provider -
+    // guards against saving a stale model left over from switching providers before picking a new one.
+    const isModelValidForProvider = uiProvider === 'custom'
+        ? !!transcriptModelConfig.model?.trim()
+        : transcriptModelConfig.provider === uiProvider && modelOptions[uiProvider].includes(transcriptModelConfig.model);
+    const canSaveCloudConfig = isModelValidForProvider && (!requiresApiKey || !!apiKey?.trim());
 
     const handleInputClick = () => {
         if (isApiKeyLocked) {
@@ -118,6 +126,26 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         // Close modal after selection
         if (onModelSelect) {
             onModelSelect();
+        }
+    };
+
+    // Persist the currently-selected cloud provider config (provider/model/apiKey/baseUrl).
+    // Local providers (localWhisper/parakeet) save themselves via ModelManager/ParakeetModelManager
+    // autoSave and never reach this handler.
+    const handleSaveCloudConfig = async () => {
+        const configToSave: TranscriptModelProps = {
+            provider: uiProvider,
+            model: transcriptModelConfig.model,
+            apiKey: apiKey ?? null,
+            baseUrl: uiProvider === 'custom' ? (baseUrl ?? null) : null,
+        };
+
+        setIsSaving(true);
+        try {
+            await onSave?.(configToSave);
+            setTranscriptModelConfig(configToSave);
+        } finally {
+            setIsSaving(false);
         }
     };
 
@@ -280,6 +308,18 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     </Button>
                                 </div>
                             </div>
+                        </div>
+                    )}
+
+                    {isCloudProvider && (
+                        <div className="mx-1">
+                            <Button
+                                type="button"
+                                onClick={handleSaveCloudConfig}
+                                disabled={!canSaveCloudConfig || isSaving}
+                            >
+                                {isSaving ? 'Saving...' : 'Save'}
+                            </Button>
                         </div>
                     )}
                 </div>

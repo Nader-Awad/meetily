@@ -5,7 +5,8 @@ import { ArrowLeft, Settings2, Mic, Database as DatabaseIcon, SparkleIcon, Flask
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
-import { TranscriptSettings } from '@/components/TranscriptSettings';
+import { toast } from 'sonner';
+import { TranscriptSettings, TranscriptModelProps } from '@/components/TranscriptSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
 import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { SummaryModelSettings } from '@/components/SummaryModelSettings';
@@ -54,6 +55,23 @@ export default function SettingsPage() {
     };
     loadTranscriptConfig();
   }, [setTranscriptModelConfig]);
+
+  // Persist the transcript/STT provider config (provider/model/apiKey/baseUrl) to the backend.
+  const handleSaveTranscriptConfig = async (config: TranscriptModelProps) => {
+    try {
+      await invoke('api_save_transcript_config', {
+        provider: config.provider,
+        model: config.model,
+        apiKey: config.apiKey ?? null,
+        baseUrl: config.baseUrl ?? null,
+      });
+      setTranscriptModelConfig(config);
+      toast.success('Transcription settings saved');
+    } catch (error) {
+      console.error('Failed to save transcript config:', error);
+      toast.error('Failed to save transcription settings');
+    }
+  };
 
   // Update underline position when active tab changes
   useLayoutEffect(() => {
@@ -123,6 +141,7 @@ export default function SettingsPage() {
               <TranscriptSettings
                 transcriptModelConfig={transcriptModelConfig}
                 setTranscriptModelConfig={setTranscriptModelConfig}
+                onSave={handleSaveTranscriptConfig}
               />
               <SpeakerIdentificationSettings />
               <VocabularySettings />

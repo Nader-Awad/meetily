@@ -2,9 +2,10 @@ import { ModelConfig } from "@/components/ModelSettingsModal";
 import { PreferenceSettings } from "@/components/PreferenceSettings";
 import { DeviceSelection } from "@/components/DeviceSelection";
 import { LanguageSelection } from "@/components/LanguageSelection";
-import { TranscriptSettings } from "@/components/TranscriptSettings";
+import { TranscriptSettings, TranscriptModelProps } from "@/components/TranscriptSettings";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { toast } from "sonner";
+import { invoke } from "@tauri-apps/api/core";
 import { useConfig } from "@/contexts/ConfigContext";
 import { useRecordingState } from "@/contexts/RecordingStateContext";
 
@@ -57,6 +58,23 @@ export function SettingsModals({
   } = useConfig();
 
   const { isRecording } = useRecordingState();
+
+  // Persist the transcript/STT provider config (provider/model/apiKey/baseUrl) to the backend.
+  const handleSaveTranscriptConfig = async (config: TranscriptModelProps) => {
+    try {
+      await invoke('api_save_transcript_config', {
+        provider: config.provider,
+        model: config.model,
+        apiKey: config.apiKey ?? null,
+        baseUrl: config.baseUrl ?? null,
+      });
+      setTranscriptModelConfig(config);
+      toast.success('Transcription settings saved');
+    } catch (error) {
+      console.error('Failed to save transcript config:', error);
+      toast.error('Failed to save transcription settings');
+    }
+  };
 
   return <>
     {/* Legacy Settings Modal */}
@@ -266,6 +284,7 @@ export function SettingsModals({
               transcriptModelConfig={transcriptModelConfig}
               setTranscriptModelConfig={setTranscriptModelConfig}
               onModelSelect={() => onClose('modelSelector')}
+              onSave={handleSaveTranscriptConfig}
             />
           </div>
 
