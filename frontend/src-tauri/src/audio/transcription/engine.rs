@@ -137,6 +137,23 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
                 }
             }
         }
+        "openrouter" | "groq" | "openai" | "custom" => {
+            // No local model to load; require an API key + model.
+            if config.api_key.as_deref().unwrap_or("").trim().is_empty() {
+                Err(format!(
+                    "Cloud provider '{}' needs an API key — add it in Settings → Transcription.",
+                    config.provider
+                ))
+            } else if config.model.trim().is_empty() {
+                Err("Cloud transcription requires a model.".to_string())
+            } else {
+                info!(
+                    "✅ Cloud provider '{}' validated (model: {})",
+                    config.provider, config.model
+                );
+                Ok(())
+            }
+        }
         other => {
             warn!("❌ Unsupported transcription provider for local recording: {}", other);
             Err(format!(
@@ -215,6 +232,41 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                     Err("Parakeet engine not initialized. This should not happen after validation.".to_string())
                 }
             }
+        }
+        "openrouter" | "groq" | "openai" | "custom" => {
+            let api_key = config.api_key.clone().unwrap_or_default();
+            if api_key.trim().is_empty() {
+                return Err(format!(
+                    "Cloud transcription provider '{}' requires an API key (set it in Settings → Transcription).",
+                    config.provider
+                ));
+            }
+            if config.model.trim().is_empty() {
+                return Err(
+                    "Cloud transcription requires a model (e.g. openai/whisper-large-v3)."
+                        .to_string(),
+                );
+            }
+            let base_url = config
+                .base_url
+                .clone()
+                .filter(|u| !u.trim().is_empty())
+                .or_else(|| {
+                    crate::audio::transcription::cloud_provider::preset_base_url(&config.provider)
+                        .map(String::from)
+                })
+                .ok_or_else(|| format!("No base URL configured for provider '{}'.", config.provider))?;
+            info!(
+                "☁️ Initializing cloud transcription provider '{}' (model {})",
+                config.provider, config.model
+            );
+            Ok(TranscriptionEngine::Provider(Arc::new(
+                crate::audio::transcription::cloud_provider::CloudProvider::new(
+                    base_url,
+                    api_key,
+                    config.model.clone(),
+                ),
+            )))
         }
         "localWhisper" | _ => {
             info!("🎤 Initializing Whisper transcription engine");
