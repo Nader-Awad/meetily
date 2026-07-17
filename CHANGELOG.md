@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.6.3 — 2026-07-15
+
+- **Speaker recognition remembers several samples per person, so it keeps
+  improving as you use it.** Previously each saved voice was a single averaged
+  fingerprint that drifted over time and could be spoiled by one mixed
+  recording. Now a voice stores multiple examples and a segment is matched to the
+  best-fitting one — more robust across different mics, rooms, and energy, and
+  re-tagging a person now *adds* an example instead of blurring the one you had.
+  Existing saved voices are carried over automatically (no re-training needed).
+- **"May clash" warnings for confusable voices.** Settings → Speaker
+  identification now flags any saved voice that looks too similar to another one
+  (a telltale sign a profile got contaminated by someone else's audio), so you
+  can review and re-record it. Runs entirely on-device.
+
+## v0.6.2 — 2026-07-15
+
+- **Speaker recognition now tells people apart even with many saved voices.**
+  Fixed a bug where, once ~10+ voices were saved, meetings kept mislabeling
+  speakers (or leaving everyone as "Speaker N"), and re-training a voice made it
+  *worse*. The CAM++ voice embeddings are strongly *anisotropic* — every voice
+  shares a large common component, so raw similarity put *different* people at
+  ~0.82 (above the auto-name bar), and averaging more segments pulled every voice
+  toward that shared mean. Matching now removes the shared component (cohort
+  mean-centering) and only assigns a name when there's a clear, competitive
+  winner — in **both** the live-recording path and Retranscribe/Import; otherwise
+  a segment stays an honest "Speaker N" for you to name. **No data migration:**
+  your saved voice profiles and existing transcript labels are untouched — only
+  how names are matched changes going forward. (Thresholds are tuned
+  conservatively and can be adjusted.)
+
 ## v0.6.1 — 2026-07-15
 
 - **Summarize meetings in new, focused ways.** Three new built-in workflow templates:

@@ -717,12 +717,14 @@ async fn run_import<R: Runtime>(
 
         // Best-effort profile lookup: missing app state or a DB error just
         // means every local speaker falls back to an anonymous "Speaker N".
+        // Flattened to one (name, exemplar) entry per stored exemplar; the
+        // matcher aggregates them per name (max over exemplars).
         let profiles: Vec<(String, Vec<f32>)> = match app.try_state::<AppState>() {
-            Some(state) => SpeakerProfilesRepository::list(state.db_manager.pool())
+            Some(state) => SpeakerProfilesRepository::list_with_exemplars(state.db_manager.pool())
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|p| (p.name, p.embedding))
+                .flat_map(|p| p.exemplars.into_iter().map(move |ex| (p.name.clone(), ex)))
                 .collect(),
             None => Vec::new(),
         };

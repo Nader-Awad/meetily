@@ -28,15 +28,15 @@ impl DiarizationSession {
         Self::with_profiles(embedding_model_path, Vec::new())
     }
 
-    /// Create a session pre-seeded with saved voice profiles (name, centroid)
+    /// Create a session pre-seeded with saved voice profiles (name, exemplars)
     /// so returning speakers are labeled by name instead of "Speaker N".
     pub fn with_profiles(
         embedding_model_path: &Path,
-        profiles: Vec<(String, Vec<f32>)>,
+        profiles: Vec<(String, Vec<Vec<f32>>)>,
     ) -> Result<Self, EmbeddingError> {
         let mut clusterer = SpeakerClusterer::new();
-        for (name, centroid) in profiles {
-            clusterer.seed_profile(&name, centroid);
+        for (name, exemplars) in profiles {
+            clusterer.seed_profile(&name, exemplars);
         }
         Ok(Self {
             extractor: EmbeddingExtractor::new(embedding_model_path)?,

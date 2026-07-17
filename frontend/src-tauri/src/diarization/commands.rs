@@ -4,7 +4,7 @@
 // (persisted in the diarization_settings table), model status, and
 // model download.
 
-use crate::database::repositories::speaker_profile::{accrue_centroid, SpeakerProfilesRepository};
+use crate::database::repositories::speaker_profile::{SpeakerProfilesRepository, DEFAULT_MAX_EXEMPLARS};
 use crate::state::AppState;
 use sqlx::SqlitePool;
 use tauri::{command, AppHandle, Manager, Runtime};
@@ -56,11 +56,6 @@ pub async fn diarization_set_enabled(
 pub async fn diarization_download_model<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     super::models::download_embedding_model(&app).await
 }
-
-/// Weight given to an existing saved profile's centroid when accruing a newly
-/// confirmed cluster centroid into it (segment count isn't tracked per-profile,
-/// so we use a fixed weight that favors stability over a single meeting's noise).
-const PROFILE_ACCRUAL_WEIGHT: usize = 8;
 
 /// Read the centroid for a speaker label from a meeting folder's speakers.json.
 fn load_centroid_from_folder(folder: &str, label: &str) -> Option<Vec<f32>> {
@@ -246,13 +241,18 @@ pub async fn diarization_rename_speaker(
             let existing = profiles.into_iter().find(|p| p.name == new_name);
 
             if let Some(existing) = existing {
-                // Already have a profile for this name - accrue into it instead
-                // of inserting a duplicate row.
-                let accrued = accrue_centroid(&existing.embedding, PROFILE_ACCRUAL_WEIGHT, &centroid);
-                SpeakerProfilesRepository::update_embedding(pool, &existing.id, &accrued)
-                    .await
-                    .map_err(|e| format!("Failed to update voice profile: {}", e))?;
-                log::info!("Strengthened voice profile '{}' from meeting {}", new_name, meeting_id);
+                // Already have a profile for this name - append this cluster as a
+                // new voice exemplar (capped, most-redundant evicted) instead of
+                // blending it into one drifting centroid or inserting a dup row.
+                SpeakerProfilesRepository::add_exemplar(
+                    pool,
+                    &existing.id,
+                    &centroid,
+                    DEFAULT_MAX_EXEMPLARS,
+                )
+                .await
+                .map_err(|e| format!("Failed to update voice profile: {}", e))?;
+                log::info!("Added a voice exemplar to '{}' from meeting {}", new_name, meeting_id);
             } else {
                 SpeakerProfilesRepository::create(pool, new_name, &centroid)
                     .await
@@ -291,6 +291,30 @@ pub async fn diarization_list_profiles(
     Ok(profiles
         .into_iter()
         .map(|p| serde_json::json!({ "id": p.id, "name": p.name }))
+        .collect())
+}
+
+/// Flag saved voices that are confusable with another saved voice (a sign of a
+/// contaminated profile). Returns `[{ name, confusedWith, score }]` — usually
+/// empty. The UI surfaces these so the user can review/delete the offenders.
+#[command]
+pub async fn diarization_flag_confusable_profiles(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let profiles = SpeakerProfilesRepository::list_with_exemplars(state.db_manager.pool())
+        .await
+        .map_err(|e| format!("Failed to load voice profiles: {}", e))?;
+    let input: Vec<(String, Vec<Vec<f32>>)> =
+        profiles.into_iter().map(|p| (p.name, p.exemplars)).collect();
+    Ok(super::flagging::flag_confusable_profiles(&input)
+        .into_iter()
+        .map(|f| {
+            serde_json::json!({
+                "name": f.name,
+                "confusedWith": f.confused_with,
+                "score": f.score,
+            })
+        })
         .collect())
 }
 
@@ -346,14 +370,16 @@ pub async fn init_session<R: Runtime>(
         }
     };
 
-    let profiles: Vec<(String, Vec<f32>)> = match app.try_state::<AppState>() {
-        Some(state) => match SpeakerProfilesRepository::list(state.db_manager.pool()).await {
-            Ok(profiles) => profiles.into_iter().map(|p| (p.name, p.embedding)).collect(),
-            Err(e) => {
-                log::warn!("🎙️ Failed to load voice profiles, continuing without: {}", e);
-                Vec::new()
+    let profiles: Vec<(String, Vec<Vec<f32>>)> = match app.try_state::<AppState>() {
+        Some(state) => {
+            match SpeakerProfilesRepository::list_with_exemplars(state.db_manager.pool()).await {
+                Ok(profiles) => profiles.into_iter().map(|p| (p.name, p.exemplars)).collect(),
+                Err(e) => {
+                    log::warn!("🎙️ Failed to load voice profiles, continuing without: {}", e);
+                    Vec::new()
+                }
             }
-        },
+        }
         None => Vec::new(),
     };
     let profile_count = profiles.len();

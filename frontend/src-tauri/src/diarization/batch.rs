@@ -5,19 +5,55 @@
 // callers supply CAM++ centroids; this module is fully unit-testable.
 
 use super::clustering::cosine_similarity;
+use super::normalize::{center_normalized, cohort_mean, MIN_PROFILES_FOR_CENTERING};
 use super::segmenter::DiarTurn;
 use std::collections::HashMap;
 
 pub const MIN_UNIT_MS: u64 = 1000;
 pub const MERGE_GAP_MS: u64 = 500;
 
-/// A cluster only adopts a saved profile's name when it is a CLEAR winner:
-/// nearest profile, cosine ≥ HIGH_MATCH_THRESHOLD, and ahead of the runner-up
-/// by ≥ MATCH_MARGIN. Otherwise the cluster stays "Speaker N" (unknown) — we
-/// never force a guess. Deliberately stricter than the intra-meeting
-/// clustering threshold; a weak/ambiguous match must read as unknown.
+// --- Profile-matching thresholds -------------------------------------------
+//
+// A cluster only adopts a saved profile's name when it is a CLEAR winner:
+// nearest profile, cosine ≥ the high-match threshold, and ahead of the
+// runner-up by ≥ the match margin. Otherwise the cluster stays "Speaker N"
+// (unknown) — we never force a guess.
+//
+// There are TWO threshold regimes because we score in one of two spaces
+// depending on how much enrolled data is available (see `ProfileMatcher`):
+//
+//  * CENTERED space (preferred): CAM++ embeddings are strongly anisotropic
+//    (every embedding shares a large common direction), so raw cross-speaker
+//    cosine sits ~0.8 and the raw thresholds below are unusable — the mean
+//    impostor score (~0.78) is *above* the old 0.72 auto-adopt bar. When the
+//    cohort (this meeting's clusters ∪ saved profiles) is large enough to
+//    estimate the shared direction, we subtract it (see `normalize`) and score
+//    on the residual, where cross-speaker cosine collapses toward 0. The
+//    CENTERED_* thresholds are calibrated for that space (impostor median ~0.1,
+//    same-speaker median ~0.7). Values are conservative — tune toward higher
+//    recall (lower threshold) or higher precision (higher threshold) as needed.
+//
+//  * RAW space (fallback): when too few saved profiles exist to estimate the
+//    shared direction (see `MIN_PROFILES_FOR_CENTERING`), centering is
+//    ill-conditioned, so we fall back to raw cosine with the original,
+//    deliberately strict thresholds.
+//
+// NOTE: the CENTERED_* values below were calibrated on a single user's ~14
+// profiles / 10 meetings. They are deliberately conservative (favor abstaining
+// as "Speaker N" over a confident wrong name) and are safe to tune; they have
+// not been validated across other mics / languages / voice populations.
+
+/// Auto-adopt threshold in RAW cosine space (fallback regime).
 pub const HIGH_MATCH_THRESHOLD: f32 = 0.72;
+/// Best-vs-runner-up margin in RAW cosine space (fallback regime).
 pub const MATCH_MARGIN: f32 = 0.08;
+
+/// Auto-adopt threshold in CENTERED (anisotropy-corrected) space.
+pub const CENTERED_HIGH_MATCH_THRESHOLD: f32 = 0.60;
+/// Best-vs-runner-up margin in CENTERED space (residual margins are larger).
+pub const CENTERED_MATCH_MARGIN: f32 = 0.12;
+/// Near-match suggestion floor in CENTERED space (analogue of `SUGGEST_FLOOR`).
+pub const CENTERED_SUGGEST_FLOOR: f32 = 0.42;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiarUnit {
@@ -52,28 +88,142 @@ pub fn merge_turns(turns: &[DiarTurn], min_unit_ms: u64, merge_gap_ms: u64) -> V
         .collect()
 }
 
+/// Scores clusters against saved profiles with anisotropy correction.
+///
+/// On construction it picks a scoring regime from how much enrolled data is
+/// available. If at least `MIN_PROFILES_FOR_CENTERING` profiles are saved, it
+/// estimates the shared anisotropy direction (`cohort_mean` over this meeting's
+/// local cluster centroids ∪ the saved profiles), pre-centers the profile
+/// embeddings, and uses the CENTERED_* thresholds; otherwise it keeps the raw
+/// embeddings and the strict RAW thresholds. Callers rank a query cluster with
+/// `ranked` and read `high`/`margin`/`suggest_floor` for the gate. Pure.
+struct ProfileMatcher<'a> {
+    /// (name, exemplar) in the active scoring space (centered when `mean` set).
+    /// A name may appear MULTIPLE times — one entry per saved voice exemplar;
+    /// `ranked` aggregates them to one score per name (max over exemplars).
+    profiles: Vec<(&'a str, Vec<f32>)>,
+    /// `Some(mean)` in the centered regime — queries get centered by it too.
+    mean: Option<Vec<f32>>,
+    high: f32,
+    margin: f32,
+    suggest_floor: f32,
+}
+
+impl<'a> ProfileMatcher<'a> {
+    fn new(local_centroids: &[(String, Vec<f32>)], profiles: &'a [(String, Vec<f32>)]) -> Self {
+        // Estimate the shared anisotropy direction from as many embeddings as we
+        // have this call: the meeting's local cluster centroids plus the saved
+        // profiles. Including the query clusters is standard for global
+        // mean-centering — each contributes ~1/N and the effect is symmetric
+        // across queries, so it is not material leakage.
+        let cohort: Vec<&[f32]> = local_centroids
+            .iter()
+            .map(|(_, c)| c.as_slice())
+            .chain(profiles.iter().map(|(_, e)| e.as_slice()))
+            .collect();
+
+        // Gate on the number of DISTINCT PROFILES (stable for a given user), not
+        // the entry/cohort count — `profiles` is a flat exemplar list with
+        // possibly several entries per name, and a different number of speakers
+        // per meeting shouldn't flip the scoring regime.
+        let n_profiles = {
+            let mut names: Vec<&str> = profiles.iter().map(|(n, _)| n.as_str()).collect();
+            names.sort_unstable();
+            names.dedup();
+            names.len()
+        };
+        let mean = if n_profiles >= MIN_PROFILES_FOR_CENTERING {
+            cohort_mean(&cohort)
+        } else {
+            None
+        };
+
+        let scored_profiles = profiles
+            .iter()
+            .map(|(name, emb)| {
+                let v = match &mean {
+                    Some(m) => center_normalized(emb, m),
+                    None => emb.clone(),
+                };
+                (name.as_str(), v)
+            })
+            .collect();
+
+        let (high, margin, suggest_floor) = if mean.is_some() {
+            (
+                CENTERED_HIGH_MATCH_THRESHOLD,
+                CENTERED_MATCH_MARGIN,
+                CENTERED_SUGGEST_FLOOR,
+            )
+        } else {
+            (HIGH_MATCH_THRESHOLD, MATCH_MARGIN, SUGGEST_FLOOR)
+        };
+
+        Self {
+            profiles: scored_profiles,
+            mean,
+            high,
+            margin,
+            suggest_floor,
+        }
+    }
+
+    /// True when anisotropy correction is active (cohort large enough).
+    #[cfg(test)]
+    fn is_centered(&self) -> bool {
+        self.mean.is_some()
+    }
+
+    /// Distinct profile NAMES ranked best-first by similarity to `query`, where
+    /// a name's score is the MAX over its exemplars (a query need only resemble
+    /// one enrolled sample). `query` is centered by the cohort mean when
+    /// centering is active. Empty when there are no profiles.
+    fn ranked(&self, query: &[f32]) -> Vec<(&'a str, f32)> {
+        let q = match &self.mean {
+            Some(m) => center_normalized(query, m),
+            None => query.to_vec(),
+        };
+        // Aggregate per name: keep the best-matching exemplar's score.
+        let mut best: Vec<(&'a str, f32)> = Vec::new();
+        for (name, emb) in &self.profiles {
+            let s = cosine_similarity(&q, emb);
+            match best.iter_mut().find(|(n, _)| n == name) {
+                Some(entry) => {
+                    if s > entry.1 {
+                        entry.1 = s;
+                    }
+                }
+                None => best.push((*name, s)),
+            }
+        }
+        best.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        best
+    }
+}
+
 /// Map each local speakrs speaker to a saved profile name, but only when the
-/// match is a clear, confident win (see `HIGH_MATCH_THRESHOLD`/`MATCH_MARGIN`).
-/// Otherwise falls back to a stable "Speaker N" label (numbered by first
-/// appearance).
+/// match is a clear, confident win. Scoring is anisotropy-corrected when enough
+/// enrolled data exists (see `ProfileMatcher`); the confident-winner gate is
+/// then applied with the regime's thresholds. Otherwise falls back to a stable
+/// "Speaker N" label (numbered by first appearance) — we never force a guess.
 pub fn map_local_speakers_to_profiles(
     local_centroids: &[(String, Vec<f32>)],
     profiles: &[(String, Vec<f32>)],
 ) -> HashMap<String, String> {
+    let matcher = ProfileMatcher::new(local_centroids, profiles);
     let mut map = HashMap::new();
     let mut anon: usize = 0;
     for (local, centroid) in local_centroids {
-        let mut sims: Vec<(&String, f32)> = profiles
-            .iter()
-            .map(|(name, emb)| (name, cosine_similarity(centroid, emb)))
-            .collect();
-        sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let sims = matcher.ranked(centroid);
 
         let confident = match sims.first() {
             Some((name, best)) => {
+                // Single-profile fallback of 0.0 is deliberate: in centered space
+                // 0.0 is ~the impostor median, so "best - 0.0 >= margin" is a
+                // meaningful bar (don't "simplify" this to -1.0 or -inf).
                 let runner_up = sims.get(1).map(|(_, s)| *s).unwrap_or(0.0);
-                if *best >= HIGH_MATCH_THRESHOLD && (*best - runner_up) >= MATCH_MARGIN {
-                    Some((*name).clone())
+                if *best >= matcher.high && (*best - runner_up) >= matcher.margin {
+                    Some((*name).to_string())
                 } else {
                     None
                 }
@@ -172,6 +322,7 @@ pub fn suggest_near_matches(
     profiles: &[(String, Vec<f32>)],
     name_map: &HashMap<String, String>,
 ) -> HashMap<String, (String, f32)> {
+    let matcher = ProfileMatcher::new(local_centroids, profiles);
     let mut out = HashMap::new();
     for (local, centroid) in local_centroids {
         let final_label = match name_map.get(local) {
@@ -183,18 +334,14 @@ pub fn suggest_near_matches(
         if profiles.iter().any(|(n, _)| n == final_label) {
             continue;
         }
-        let mut sims: Vec<(&String, f32)> = profiles
-            .iter()
-            .map(|(name, emb)| (name, cosine_similarity(centroid, emb)))
-            .collect();
-        sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let sims = matcher.ranked(centroid);
         if let Some((name, best)) = sims.first() {
             let runner_up = sims.get(1).map(|(_, s)| *s).unwrap_or(0.0);
-            if *best >= SUGGEST_FLOOR
-                && *best < HIGH_MATCH_THRESHOLD
-                && (*best - runner_up) >= MATCH_MARGIN
+            if *best >= matcher.suggest_floor
+                && *best < matcher.high
+                && (*best - runner_up) >= matcher.margin
             {
-                out.insert(final_label.clone(), ((*name).clone(), *best));
+                out.insert(final_label.clone(), ((*name).to_string(), *best));
             }
         }
     }
@@ -287,6 +434,22 @@ mod tests {
         let profiles = vec![("Alice".to_string(), unit(vec![1.0, 0.0, 0.0]))];
         let map = map_local_speakers_to_profiles(&[("A".to_string(), cluster)], &profiles);
         assert_eq!(map.get("A").map(String::as_str), Some("Alice"));
+    }
+
+    #[test]
+    fn multi_exemplar_matches_via_best_exemplar_without_false_ambiguity() {
+        // P0 has TWO exemplars far apart; a query near the 2nd one matches P0.
+        // The two same-name exemplars must aggregate to ONE name (max score), so
+        // the runner-up is P1 (a different person), not P0's other exemplar —
+        // otherwise the competitive margin would spuriously fail.
+        let profiles = vec![
+            ("P0".to_string(), unit(vec![1.0, 0.0, 0.0])),
+            ("P0".to_string(), unit(vec![0.0, 0.0, 1.0])),
+            ("P1".to_string(), unit(vec![0.0, 1.0, 0.0])),
+        ];
+        let query = unit(vec![0.02, 0.0, 1.0]); // ~ P0's 2nd exemplar
+        let map = map_local_speakers_to_profiles(&[("A".to_string(), query)], &profiles);
+        assert_eq!(map.get("A").map(String::as_str), Some("P0"));
     }
 
     #[test]
@@ -397,5 +560,85 @@ mod tests {
         let mut name_map = std::collections::HashMap::new();
         name_map.insert("A".to_string(), "Speaker 1".to_string());
         assert!(suggest_near_matches(&[("A".to_string(), cluster)], &profiles, &name_map).is_empty());
+    }
+
+    // --- centered (anisotropy-corrected) regime -----------------------------
+    //
+    // The small-fixture tests above all have < MIN_PROFILES_FOR_CENTERING profiles,
+    // so they exercise (and pin) the RAW fallback path. The tests below build a
+    // cohort large enough to trigger centering and verify it separates speakers
+    // that raw cosine cannot.
+
+    /// 8-dim anisotropic embedding: a large shared component on every axis plus
+    /// a bump on one speaker axis. Distinct speakers still sit at ~0.99 raw
+    /// cosine (the shared part dominates), so the raw gate cannot separate them.
+    fn aniso8(speaker_axis: usize, bump: f32) -> Vec<f32> {
+        let mut v = vec![3.0f32; 8];
+        v[speaker_axis] += 1.0 + bump;
+        unit(v)
+    }
+
+    fn profiles8() -> Vec<(String, Vec<f32>)> {
+        (0..8).map(|i| (format!("P{i}"), aniso8(i, 0.0))).collect()
+    }
+
+    #[test]
+    fn centered_regime_activates_with_enough_cohort() {
+        // 8 profiles >= MIN_PROFILES_FOR_CENTERING (regime gates on profile count).
+        let locals = vec![
+            ("L2".to_string(), aniso8(2, 0.4)),
+            ("L5".to_string(), aniso8(5, 0.4)),
+        ];
+        let profiles = profiles8();
+        let matcher = ProfileMatcher::new(&locals, &profiles);
+        assert!(matcher.is_centered());
+        assert_eq!(matcher.high, CENTERED_HIGH_MATCH_THRESHOLD);
+    }
+
+    #[test]
+    fn raw_regime_when_cohort_too_small() {
+        // 3 profiles < MIN_PROFILES_FOR_CENTERING -> raw fallback.
+        let locals = vec![("L0".to_string(), aniso8(0, 0.4))];
+        let profiles: Vec<(String, Vec<f32>)> =
+            (0..3).map(|i| (format!("P{i}"), aniso8(i, 0.0))).collect();
+        let matcher = ProfileMatcher::new(&locals, &profiles);
+        assert!(!matcher.is_centered());
+        assert_eq!(matcher.high, HIGH_MATCH_THRESHOLD);
+    }
+
+    #[test]
+    fn centered_regime_matches_correct_speaker_where_raw_cannot() {
+        let profiles = profiles8();
+        let locals = vec![
+            ("L2".to_string(), aniso8(2, 0.5)),
+            ("L6".to_string(), aniso8(6, 0.5)),
+        ];
+
+        // Raw cosine can't tell them apart: best vs runner-up is within the raw
+        // margin, so the raw gate would abstain.
+        let raw_best = cosine_similarity(&locals[0].1, &profiles[2].1);
+        let raw_runner = cosine_similarity(&locals[0].1, &profiles[3].1);
+        assert!(
+            raw_best > 0.98 && (raw_best - raw_runner) < MATCH_MARGIN,
+            "raw is ambiguous: best {raw_best} runner {raw_runner}"
+        );
+
+        // Centered scoring recovers the correct identities.
+        let map = map_local_speakers_to_profiles(&locals, &profiles);
+        assert_eq!(map.get("L2").map(String::as_str), Some("P2"));
+        assert_eq!(map.get("L6").map(String::as_str), Some("P6"));
+    }
+
+    #[test]
+    fn centered_regime_abstains_on_ambiguous_blend() {
+        // A local sitting between two profiles (bumps on both axes) is not a
+        // clear winner for either -> stays "Speaker N".
+        let profiles = profiles8();
+        let mut blended = vec![3.0f32; 8];
+        blended[2] += 1.0; // between P2 ...
+        blended[3] += 1.0; // ... and P3
+        let locals = vec![("Lx".to_string(), unit(blended))];
+        let map = map_local_speakers_to_profiles(&locals, &profiles);
+        assert_eq!(map.get("Lx").map(String::as_str), Some("Speaker 1"));
     }
 }
