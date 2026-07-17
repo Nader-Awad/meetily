@@ -16,8 +16,9 @@ pub(crate) async fn acquire_engine_lifecycle_lock() -> OwnedMutexGuard<()> {
 
 /// Unload the transcription engine after a batch job (import or retranscription).
 /// Skips unloading if a live recording is currently in progress, since recording
-/// uses the same global engine instances.
-pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
+/// uses the same global engine instances. Cloud providers hold no local model,
+/// so there is nothing to unload for them.
+pub(crate) async fn unload_engine_after_batch(provider: &str) {
     let _engine_lifecycle_guard = acquire_engine_lifecycle_lock().await;
 
     if crate::audio::recording_commands::is_recording().await {
@@ -25,25 +26,102 @@ pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
         return;
     }
 
-    if use_parakeet {
-        use crate::parakeet_engine::commands::PARAKEET_ENGINE;
-        let engine = {
-            let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().cloned()
-        };
-        if let Some(e) = engine {
-            e.unload_model().await;
+    match provider {
+        // Cloud providers keep no local model in memory — nothing to unload.
+        "openrouter" | "groq" | "openai" | "custom" => {
+            log::debug!(
+                "No local transcription engine to unload for cloud provider '{}'",
+                provider
+            );
         }
-    } else {
-        use crate::whisper_engine::commands::WHISPER_ENGINE;
-        let engine = {
-            let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().cloned()
-        };
-        if let Some(e) = engine {
-            e.unload_model().await;
+        "parakeet" => {
+            use crate::parakeet_engine::commands::PARAKEET_ENGINE;
+            let engine = {
+                let guard = PARAKEET_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+                guard.as_ref().cloned()
+            };
+            if let Some(e) = engine {
+                e.unload_model().await;
+            }
+        }
+        // localWhisper / whisper / anything else defaults to the Whisper engine,
+        // matching the pre-refactor `!use_parakeet` behavior.
+        _ => {
+            use crate::whisper_engine::commands::WHISPER_ENGINE;
+            let engine = {
+                let guard = WHISPER_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+                guard.as_ref().cloned()
+            };
+            if let Some(e) = engine {
+                e.unload_model().await;
+            }
         }
     }
+}
+
+/// Build a cloud transcription provider (`Arc<dyn TranscriptionProvider>`) for a
+/// batch job (import or retranscription) from stored settings: API key, base URL,
+/// and model. Shared by both batch selectors for the
+/// `openrouter` / `groq` / `openai` / `custom` providers so the multipart cloud
+/// request path is identical to the live engine's `CloudProvider`.
+pub(crate) async fn build_cloud_provider<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    provider: &str,
+    requested_model: Option<&str>,
+) -> std::result::Result<Arc<dyn crate::audio::transcription::TranscriptionProvider>, String> {
+    use crate::database::repositories::setting::SettingsRepository;
+    use tauri::Manager;
+
+    let app_state = app
+        .try_state::<crate::state::AppState>()
+        .ok_or_else(|| "App state not available".to_string())?;
+    let pool = app_state.db_manager.pool();
+
+    // Load the stored transcript settings once — used for the model fallback and
+    // the custom base URL.
+    let stored = SettingsRepository::get_transcript_config(pool)
+        .await
+        .map_err(|e| format!("Failed to load transcript config: {}", e))?;
+
+    // API key is required for any cloud provider.
+    let api_key = SettingsRepository::get_transcript_api_key(pool, provider)
+        .await
+        .map_err(|e| format!("Failed to load API key for provider '{}': {}", provider, e))?
+        .unwrap_or_default();
+    if api_key.trim().is_empty() {
+        return Err(format!(
+            "Cloud transcription provider '{}' requires an API key (set it in Settings → Transcription).",
+            provider
+        ));
+    }
+
+    // Model: an explicitly requested model wins; otherwise fall back to the
+    // stored config model.
+    let model = match requested_model {
+        Some(m) if !m.trim().is_empty() => m.to_string(),
+        _ => stored.as_ref().map(|s| s.model.clone()).unwrap_or_default(),
+    };
+    if model.trim().is_empty() {
+        return Err(
+            "Cloud transcription requires a model (e.g. openai/whisper-large-v3).".to_string(),
+        );
+    }
+
+    // Base URL: a named preset resolves by provider; `custom` uses the stored URL.
+    let base_url = crate::audio::transcription::cloud_provider::preset_base_url(provider)
+        .map(|s| s.to_string())
+        .or_else(|| stored.as_ref().and_then(|s| s.transcript_base_url.clone()))
+        .filter(|u| !u.trim().is_empty())
+        .ok_or_else(|| format!("No base URL configured for provider '{}'.", provider))?;
+
+    info!(
+        "☁️ Using cloud transcription provider '{}' (model {}) for batch job",
+        provider, model
+    );
+
+    Ok(Arc::new(
+        crate::audio::transcription::cloud_provider::CloudProvider::new(base_url, api_key, model),
+    ))
 }
 
 /// Create transcript segments from transcription results.

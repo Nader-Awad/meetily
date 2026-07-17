@@ -1,6 +1,7 @@
 // Retranscription module - allows re-processing stored audio with different settings
 
 use crate::audio::decoder::decode_audio_file;
+use crate::audio::transcription::{ParakeetProvider, TranscriptionProvider, WhisperProvider};
 use crate::audio::vad::get_speech_chunks_with_progress;
 use super::common::{create_transcript_segments, slice_samples_16k, split_segment_at_silence, split_unit_for_transcription, write_transcripts_json};
 use super::constants::AUDIO_EXTENSIONS;
@@ -103,11 +104,14 @@ pub async fn start_retranscription<R: Runtime>(
     // Reset cancellation flag
     RETRANSCRIPTION_CANCELLED.store(false, Ordering::SeqCst);
 
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    // Provider string used to decide which local engine (if any) to unload after
+    // the batch. Defaults to Whisper for None/unknown, matching prior behavior.
+    let provider_for_unload = provider.as_deref().unwrap_or("localWhisper").to_string();
     let result = run_retranscription(app.clone(), meeting_id.clone(), meeting_folder_path, language, model, provider).await;
 
-    // Unload the engine after the batch job (success, failure, or cancellation)
-    super::common::unload_engine_after_batch(use_parakeet).await;
+    // Unload the engine after the batch job (success, failure, or cancellation).
+    // No-op for cloud providers, which hold no local model.
+    super::common::unload_engine_after_batch(&provider_for_unload).await;
 
     // Guard will automatically clear flag on drop
     // No need for manual: RETRANSCRIPTION_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -182,8 +186,9 @@ async fn run_retranscription<R: Runtime>(
     let folder_path = PathBuf::from(&meeting_folder_path);
     let audio_path = find_audio_file(&folder_path)?;
 
-    // Determine which provider to use (default to whisper)
-    let use_parakeet = provider.as_deref() == Some("parakeet");
+    // Determine which provider to use (default to whisper). The selector below
+    // maps this string to a Whisper/Parakeet/Cloud provider behind the trait.
+    let provider_str = provider.as_deref().unwrap_or("localWhisper").to_string();
 
     info!(
         "Starting retranscription for meeting {} with language {:?}, model {:?}, provider {:?}",
@@ -304,17 +309,11 @@ async fn run_retranscription<R: Runtime>(
 
     emit_progress(&app, &meeting_id, "transcribing", 25, "Loading transcription engine...");
 
-    // Initialize the appropriate engine once (not per-segment)
-    let whisper_engine = if !use_parakeet {
-        Some(get_or_init_whisper(&app, model.as_deref()).await?)
-    } else {
-        None
-    };
-    let parakeet_engine = if use_parakeet {
-        Some(get_or_init_parakeet(&app, model.as_deref()).await?)
-    } else {
-        None
-    };
+    // Initialize the appropriate transcription provider (Whisper/Parakeet/Cloud)
+    // once (not per-segment), behind the shared trait. Reached only when
+    // total_segments > 0 (the no-speech case returns early above).
+    let transcriber: Arc<dyn TranscriptionProvider> =
+        select_batch_provider(&app, &provider_str, model.as_deref()).await?;
 
     // Split very long segments at silence boundaries for better transcription quality.
     // Hard cuts at arbitrary sample positions lose words at boundaries. Instead, scan
@@ -449,29 +448,17 @@ async fn run_retranscription<R: Runtime>(
             );
 
             for sub in &sub_pieces {
-                // Transcribe this piece with the same engine call the VAD path
-                // uses. Best-effort: a transcription failure skips the piece
-                // rather than aborting the whole batch.
-                let (text, conf) = if use_parakeet {
-                    let engine = parakeet_engine.as_ref().unwrap();
-                    match engine.transcribe_audio(sub.samples.clone()).await {
-                        Ok(text) => (text, 0.9f32),
-                        Err(e) => {
-                            warn!("Parakeet transcription failed on diarization unit {}: {}", i, e);
-                            continue;
-                        }
-                    }
-                } else {
-                    let engine = whisper_engine.as_ref().unwrap();
-                    match engine
-                        .transcribe_audio_with_confidence(sub.samples.clone(), language.clone())
-                        .await
-                    {
-                        Ok((text, conf, _)) => (text, conf),
-                        Err(e) => {
-                            warn!("Whisper transcription failed on diarization unit {}: {}", i, e);
-                            continue;
-                        }
+                // Transcribe this piece through the shared provider trait.
+                // Best-effort: a transcription failure skips the piece rather
+                // than aborting the whole batch.
+                let (text, conf) = match transcriber
+                    .transcribe(sub.samples.clone(), language.clone())
+                    .await
+                {
+                    Ok(r) => (r.text, r.confidence.unwrap_or(0.9)),
+                    Err(e) => {
+                        warn!("Transcription failed on diarization unit {}: {}", i, e);
+                        continue;
                     }
                 };
 
@@ -567,21 +554,18 @@ async fn run_retranscription<R: Runtime>(
                 continue;
             }
 
-            // Transcribe this segment
-            let (text, conf) = if use_parakeet {
-                let engine = parakeet_engine.as_ref().unwrap();
-                let text = engine
-                    .transcribe_audio(segment.samples.clone())
-                    .await
-                    .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-                (text, 0.9f32)
-            } else {
-                let engine = whisper_engine.as_ref().unwrap();
-                let (text, conf, _) = engine
-                    .transcribe_audio_with_confidence(segment.samples.clone(), language.clone())
-                    .await
-                    .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-                (text, conf)
+            // Transcribe this segment through the shared provider trait.
+            // Best-effort: a transcription failure skips the segment rather
+            // than aborting the whole batch.
+            let (text, conf) = match transcriber
+                .transcribe(segment.samples.clone(), language.clone())
+                .await
+            {
+                Ok(r) => (r.text, r.confidence.unwrap_or(0.9)),
+                Err(e) => {
+                    warn!("Transcription failed on segment {}: {}", i, e);
+                    continue;
+                }
             };
 
             // Skip empty transcripts
@@ -744,6 +728,32 @@ fn emit_progress<R: Runtime>(
     );
 }
 
+/// Select the batch transcription provider for a provider string, returning a
+/// single `Arc<dyn TranscriptionProvider>`. Whisper/Parakeet reuse the existing
+/// local engine loaders; cloud providers build a `CloudProvider` from settings.
+/// Cloud STT supports `language` via the request, so it is allowed here.
+async fn select_batch_provider<R: Runtime>(
+    app: &AppHandle<R>,
+    provider: &str,
+    model: Option<&str>,
+) -> Result<Arc<dyn TranscriptionProvider>> {
+    match provider {
+        "openrouter" | "groq" | "openai" | "custom" => {
+            super::common::build_cloud_provider(app, provider, model)
+                .await
+                .map_err(|e| anyhow!(e))
+        }
+        "parakeet" => Ok(Arc::new(ParakeetProvider::new(
+            get_or_init_parakeet(app, model).await?,
+        ))),
+        // localWhisper / whisper / anything else defaults to Whisper, matching
+        // the pre-refactor `!use_parakeet` behavior.
+        _ => Ok(Arc::new(WhisperProvider::new(
+            get_or_init_whisper(app, model).await?,
+        ))),
+    }
+}
+
 /// Get or initialize the Whisper engine, auto-loading the model if needed
 /// If `requested_model` is provided, ensures that specific model is loaded
 async fn get_or_init_whisper<R: Runtime>(
@@ -831,12 +841,19 @@ async fn get_configured_whisper_model<R: Runtime>(app: &AppHandle<R>) -> Result<
         Some((provider, model)) => {
             info!("Found transcript config: provider={}, model={}", provider, model);
 
-            // Check if provider is Whisper-based
+            // Check if provider is Whisper-based. If the stored provider is
+            // something else (e.g. a cloud provider) but the Whisper arm was
+            // selected without an explicit model, fall back to the default
+            // Whisper model instead of hard-erroring — cloud providers route to
+            // their own arm in the selector and never reach here.
             if provider == "localWhisper" || provider == "whisper" {
                 Ok(model)
             } else {
-                error!("Retranscription requires Whisper provider, but configured provider is: {}", provider);
-                Err(anyhow!("Retranscription requires Whisper. Current provider '{}' does not support retranscription with language selection.", provider))
+                warn!(
+                    "Configured provider '{}' is not Whisper; using default Whisper model '{}' for retranscription",
+                    provider, DEFAULT_WHISPER_MODEL
+                );
+                Ok(DEFAULT_WHISPER_MODEL.to_string())
             }
         },
         None => {
