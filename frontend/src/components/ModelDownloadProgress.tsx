@@ -122,7 +122,7 @@ export function DownloadSummary({ totalModels, downloadedModels, totalSizeMb }: 
       </div>
       {downloadedModels > 0 && (
         <div className="mt-1 text-xs text-green-600">
-          ✓ Models run locally - no internet required for transcription
+          ✓ Local models run on-device - no internet required for transcription
         </div>
       )}
     </div>

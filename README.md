@@ -66,7 +66,7 @@ A privacy-first AI meeting assistant that captures, transcribes, and summarizes 
 
 ## Introduction
 
-Meetily is a privacy-first AI meeting assistant that runs entirely on your local machine. It captures your meetings, transcribes them in real-time, and generates summaries, all without sending any data to the cloud. This makes it the perfect solution for professionals and enterprises who need to maintain complete control over their sensitive information.
+Meetily is a privacy-first AI meeting assistant that, by default, runs entirely on your local machine. It captures your meetings, transcribes them in real-time, and generates summaries, all without sending any data to the cloud. Cloud transcription (OpenRouter, Groq, or OpenAI) and cloud summary providers are available as an opt-in for higher accuracy — in that case, audio or text is sent to the provider you choose. This makes it a strong solution for professionals and enterprises who need to maintain control over their sensitive information.
 
 ## Why Meetily?
 
@@ -135,7 +135,7 @@ pnpm install
 
 ### 🎯 Local Transcription
 
-Transcribe meetings entirely on your device using **Whisper** or **Parakeet** models. No cloud required.
+Transcribe meetings **on your device by default** using **Whisper** or **Parakeet** models — no cloud required. You can also **opt in to a cloud provider** (OpenRouter, Groq, or OpenAI) for higher accuracy; doing so sends your audio to the chosen provider.
 
 <p align="center">
     <img src="docs/home.png" width="650" style="border-radius: 10px;" alt="Meetily Demo" />
@@ -165,7 +165,7 @@ Generate meeting summaries with your choice of AI provider. **Ollama** (local) i
 
 ### 🔒 Privacy-First Design
 
-All data stays on your machine. Transcription models, recordings, and transcripts are stored locally.
+By default, all data stays on your machine — transcription models, recordings, and transcripts are stored locally. Cloud transcription is opt-in only: if you choose a cloud provider (OpenRouter, Groq, or OpenAI), your audio is sent to that provider for processing.
 
 <p align="center">
     <img src="docs/settings.png" width="650" style="border-radius: 10px;" alt="Local Transcription and storage" />
