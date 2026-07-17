@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.4 — 2026-07-17
+
+- **Teach Meetily your vocabulary, so it stops mangling names.** A new
+  **Settings → Transcription → Custom Vocabulary** panel lets you add domain
+  terms (product names, jargon, people) as two kinds of entries: **Terms** bias
+  Whisper transcription toward the right spelling, and **Corrections** fix a
+  mis-heard word everywhere (e.g. "sneak" → "Snyk") — corrections apply on every
+  transcription engine, both live and on Retranscribe/Import. Each entry can also
+  carry a short **description**, which is handed to the summary model as a
+  glossary so summaries use the right terms and meanings. The transcript stays
+  fully on-device; descriptions are only shared with your configured summary model.
+
 ## v0.6.3 — 2026-07-15
 
 - **Speaker recognition remembers several samples per person, so it keeps
