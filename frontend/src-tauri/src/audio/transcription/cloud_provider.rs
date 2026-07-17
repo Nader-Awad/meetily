@@ -114,6 +114,17 @@ mod tests {
         assert_eq!(i0, 0);
         let i1 = i16::from_le_bytes([w[46], w[47]]);
         assert_eq!(i1, 32767);
+        // sample 2 is -1.0 → -32767 (negative full-scale)
+        assert_eq!(i16::from_le_bytes([w[48], w[49]]), -32767);
+    }
+
+    #[test]
+    fn wav_saturates_out_of_range_samples() {
+        // Values beyond [-1.0, 1.0] must clamp to full scale, not wrap/overflow.
+        let hi = pcm16_wav_bytes(&[2.0f32], 16000);
+        assert_eq!(i16::from_le_bytes([hi[44], hi[45]]), 32767);
+        let lo = pcm16_wav_bytes(&[-2.0f32], 16000);
+        assert_eq!(i16::from_le_bytes([lo[44], lo[45]]), -32767);
     }
     #[test]
     fn parse_text_ok_and_errors() {

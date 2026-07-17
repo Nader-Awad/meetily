@@ -820,6 +820,21 @@ async fn run_import<R: Runtime>(
         transcribed_count, processable_count, avg_confidence
     );
 
+    // Guard against creating an empty meeting when VAD found speech
+    // (processable_count > 0) but EVERY segment failed to transcribe
+    // (all_transcripts empty — bad cloud API key/401, rate-limit/429, offline).
+    // Without this, create_meeting_with_transcripts would persist a brand-new
+    // meeting with no transcripts and report success. Bail out (removing the
+    // just-created folder, mirroring the cancellation cleanup) so no empty
+    // meeting is created. The "no speech detected" case (total_segments == 0 →
+    // processable_count == 0) is unaffected and still creates an empty meeting.
+    if transcribed_count == 0 && processable_count > 0 {
+        let _ = std::fs::remove_dir_all(&meeting_folder);
+        return Err(anyhow!(
+            "Transcription produced no text (all segments failed) — no meeting was created"
+        ));
+    }
+
     // Check for cancellation
     if IMPORT_CANCELLED.load(Ordering::SeqCst) {
         let _ = std::fs::remove_dir_all(&meeting_folder);

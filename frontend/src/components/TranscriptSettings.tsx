@@ -92,7 +92,10 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const isModelValidForProvider = uiProvider === 'custom'
         ? !!transcriptModelConfig.model?.trim()
         : transcriptModelConfig.provider === uiProvider && modelOptions[uiProvider].includes(transcriptModelConfig.model);
-    const canSaveCloudConfig = isModelValidForProvider && (!requiresApiKey || !!apiKey?.trim());
+    // A custom (OpenAI-compatible) endpoint has no preset base URL, so a blank one would
+    // only fail later at transcription time. Require a non-empty base URL before enabling Save.
+    const hasRequiredBaseUrl = uiProvider !== 'custom' || !!baseUrl?.trim();
+    const canSaveCloudConfig = isModelValidForProvider && (!requiresApiKey || !!apiKey?.trim()) && hasRequiredBaseUrl;
 
     const handleInputClick = () => {
         if (isApiKeyLocked) {
@@ -166,6 +169,13 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 onValueChange={(value) => {
                                     const provider = value as TranscriptModelProps['provider'];
                                     setUiProvider(provider);
+                                    // Reset any stale model carried over from the previous provider so a
+                                    // model the user didn't choose for THIS provider can't leak into Save
+                                    // (e.g. switching to 'custom' while model still holds 'whisper-1').
+                                    // Cleared to '' — the model picker/input starts empty and the user must
+                                    // actively choose one. Kept decoupled from transcriptModelConfig.provider
+                                    // (still only set when a model is picked/saved) to avoid a first-save deadlock.
+                                    setTranscriptModelConfig({ ...transcriptModelConfig, model: '' });
                                     if (provider !== 'localWhisper' && provider !== 'parakeet') {
                                         fetchApiKey(provider);
                                     }

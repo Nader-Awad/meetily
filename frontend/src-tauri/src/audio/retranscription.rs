@@ -599,6 +599,21 @@ async fn run_retranscription<R: Runtime>(
         transcribed_count, processable_count, avg_confidence
     );
 
+    // Guard against silent data loss: VAD found speech (processable_count > 0) but
+    // EVERY segment failed to transcribe (all_transcripts empty). Because the
+    // per-segment loop is best-effort (Err => continue), a bad cloud API key (401),
+    // rate-limit (429), or offline endpoint yields zero transcripts. Proceeding
+    // would DELETE the existing good transcript and insert nothing, then overwrite
+    // transcripts.json — destroying user data while reporting success. Bail out
+    // BEFORE the delete/transaction/write so the existing transcript is untouched.
+    // (The `total_segments == 0` early-return above only covers "no speech
+    // detected", not "speech detected but nothing transcribed".)
+    if transcribed_count == 0 && processable_count > 0 {
+        return Err(anyhow!(
+            "Transcription produced no text (all segments failed) — leaving the existing transcript unchanged"
+        ));
+    }
+
     // Check for cancellation
     if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
         return Err(anyhow!("Retranscription cancelled"));
