@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.6.7 — 2026-07-17
+
+- **Optional cloud transcription — use a remote Whisper-large (or better) instead of the
+  local model.** Settings → Transcription now lets you pick a cloud provider — **OpenRouter**
+  (one key for the whole catalog: whisper-large-v3, Deepgram Nova-3, Voxtral, …), **Groq**,
+  **OpenAI**, or a **Custom** OpenAI-compatible endpoint — enter your API key (and a base URL
+  for Custom), and both live recording and Retranscribe/Import will use it. It's usually far
+  more accurate than the local `medium` model and costs pennies per hour. **Local
+  Whisper/Parakeet remain the default and keep everything on your device;** cloud is opt-in
+  and sends audio to the provider you choose (clearly noted in Settings).
+
 ## v0.6.6 — 2026-07-17
 
 - **Create and edit summary templates in the app.** Settings → Workflows now has a
