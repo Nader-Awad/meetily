@@ -698,6 +698,9 @@ pub fn run() {
             summary::template_commands::api_list_templates,
             summary::template_commands::api_get_template_details,
             summary::template_commands::api_validate_template,
+            summary::template_commands::api_get_template,
+            summary::template_commands::api_save_custom_template,
+            summary::template_commands::api_delete_custom_template,
             // Workflow commands
             summary::workflows::commands::api_list_workflows,
             summary::workflows::commands::api_save_workflow,

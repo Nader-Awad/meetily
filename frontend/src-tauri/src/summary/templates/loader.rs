@@ -1,5 +1,6 @@
 use super::defaults;
 use super::types::Template;
+use std::path::Path;
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
 use once_cell::sync::Lazy;
@@ -27,6 +28,49 @@ fn get_custom_templates_dir() -> Option<PathBuf> {
     path.push("Meetily");
     path.push("templates");
     Some(path)
+}
+
+/// Valid custom-template id = filename stem. Restricted to prevent path traversal.
+pub fn is_valid_template_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// True if a user-authored custom template file exists for this id.
+pub fn is_custom_template(id: &str) -> bool {
+    get_custom_templates_dir()
+        .map(|d| d.join(format!("{id}.json")).exists())
+        .unwrap_or(false)
+}
+
+/// Testable core: write `<dir>/<id>.json` (creating `dir` if needed).
+pub fn save_custom_template_in(dir: &Path, id: &str, template: &Template) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create templates dir: {e}"))?;
+    let json = serde_json::to_string_pretty(template).map_err(|e| format!("Failed to serialize template: {e}"))?;
+    std::fs::write(dir.join(format!("{id}.json")), json).map_err(|e| format!("Failed to write template '{id}': {e}"))?;
+    Ok(())
+}
+
+/// Write a custom template into the user's custom templates directory.
+pub fn save_custom_template(id: &str, template: &Template) -> Result<(), String> {
+    let dir = get_custom_templates_dir().ok_or_else(|| "Could not resolve custom templates directory".to_string())?;
+    save_custom_template_in(&dir, id, template)
+}
+
+/// Testable core: remove `<dir>/<id>.json`; err if absent.
+pub fn delete_custom_template_in(dir: &Path, id: &str) -> Result<(), String> {
+    let path = dir.join(format!("{id}.json"));
+    if !path.exists() {
+        return Err(format!("Custom template '{id}' does not exist"));
+    }
+    std::fs::remove_file(&path).map_err(|e| format!("Failed to delete template '{id}': {e}"))
+}
+
+/// Delete a custom template from the user's custom templates directory.
+pub fn delete_custom_template(id: &str) -> Result<(), String> {
+    let dir = get_custom_templates_dir().ok_or_else(|| "Could not resolve custom templates directory".to_string())?;
+    delete_custom_template_in(&dir, id)
 }
 
 /// Load a template from the bundled resources directory
@@ -261,5 +305,33 @@ mod tests {
             assert!(!template.name.is_empty());
             assert!(!template.sections.is_empty());
         }
+    }
+
+    #[test]
+    fn valid_template_id_rules() {
+        assert!(is_valid_template_id("daily_standup"));
+        assert!(is_valid_template_id("my-tpl-1"));
+        assert!(!is_valid_template_id(""));
+        assert!(!is_valid_template_id("../evil"));
+        assert!(!is_valid_template_id("a/b"));
+        assert!(!is_valid_template_id("Has Space"));
+        assert!(!is_valid_template_id("UPPER"));
+        assert!(!is_valid_template_id(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn custom_template_save_read_delete_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("meetily_tpl_test_{}", uuid::Uuid::new_v4()));
+        let json = r#"{"name":"T","description":"d","sections":[{"title":"S","instruction":"i","format":"list"}]}"#;
+        let tpl = validate_and_parse_template(json).expect("valid");
+        save_custom_template_in(&tmp, "my_tpl", &tpl).expect("save ok (creates dir)");
+        let content = std::fs::read_to_string(tmp.join("my_tpl.json")).expect("file written");
+        let parsed = validate_and_parse_template(&content).expect("round-trips + validates");
+        assert_eq!(parsed.name, "T");
+        assert_eq!(parsed.sections.len(), 1);
+        delete_custom_template_in(&tmp, "my_tpl").expect("delete ok");
+        assert!(!tmp.join("my_tpl.json").exists());
+        assert!(delete_custom_template_in(&tmp, "my_tpl").is_err()); // gone now
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -14,6 +14,10 @@ pub struct TemplateInfo {
 
     /// Brief description of the template's purpose
     pub description: String,
+
+    /// True if this template is a user-authored custom template (vs. bundled/built-in)
+    #[serde(rename = "isCustom")]
+    pub is_custom: bool,
 }
 
 /// Detailed template structure for preview/debugging
@@ -49,10 +53,14 @@ pub async fn api_list_templates<R: Runtime>(
 
     let template_infos: Vec<TemplateInfo> = templates
         .into_iter()
-        .map(|(id, name, description)| TemplateInfo {
-            id,
-            name,
-            description,
+        .map(|(id, name, description)| {
+            let is_custom = templates::is_custom_template(&id);
+            TemplateInfo {
+                id,
+                name,
+                description,
+                is_custom,
+            }
         })
         .collect();
 
@@ -93,6 +101,63 @@ pub async fn api_get_template_details<R: Runtime>(
     info!("Retrieved template details for '{}'", details.name);
 
     Ok(details)
+}
+
+/// Gets the full template structure for a specific template id
+///
+/// # Arguments
+/// * `template_id` - Template identifier (e.g., "daily_standup")
+///
+/// # Returns
+/// The full `Template` (name, description, sections)
+#[tauri::command]
+pub async fn api_get_template<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: String,
+) -> Result<crate::summary::templates::Template, String> {
+    crate::summary::templates::get_template(&template_id)
+}
+
+/// Saves a custom template to the user's custom templates directory
+///
+/// # Arguments
+/// * `template_id` - Template identifier to save under (used as the filename)
+/// * `template` - The template content to save
+///
+/// # Returns
+/// Ok(()) if saved successfully, Err(error_message) if the id is invalid or the template fails validation
+#[tauri::command]
+pub async fn api_save_custom_template<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: String,
+    template: crate::summary::templates::Template,
+) -> Result<(), String> {
+    if !crate::summary::templates::is_valid_template_id(&template_id) {
+        return Err(format!(
+            "Invalid template id '{}': use lowercase letters, digits, '_' or '-' (max 64 chars).",
+            template_id
+        ));
+    }
+    template.validate()?;
+    crate::summary::templates::save_custom_template(&template_id, &template)
+}
+
+/// Deletes a custom template from the user's custom templates directory
+///
+/// # Arguments
+/// * `template_id` - Template identifier to delete
+///
+/// # Returns
+/// Ok(()) if deleted successfully, Err(error_message) if the id is invalid or the template does not exist
+#[tauri::command]
+pub async fn api_delete_custom_template<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: String,
+) -> Result<(), String> {
+    if !crate::summary::templates::is_valid_template_id(&template_id) {
+        return Err(format!("Invalid template id '{}'.", template_id));
+    }
+    crate::summary::templates::delete_custom_template(&template_id)
 }
 
 /// Validates a custom template JSON string
