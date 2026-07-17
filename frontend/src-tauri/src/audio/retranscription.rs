@@ -628,18 +628,22 @@ async fn run_retranscription<R: Runtime>(
         .ok_or_else(|| anyhow!("App state not available"))?;
 
     // Create transcript segments with proper timestamps from VAD, applying the
-    // custom vocabulary correction dictionary (authoritative DB copy, since this
-    // is a batch/offline path).
-    let corrections = {
+    // custom vocabulary correction dictionary and dropping Whisper initial_prompt
+    // echoes (authoritative DB copy, since this is a batch/offline path).
+    let vocab = {
         let pool = app_state.db_manager.pool();
         crate::database::repositories::setting::SettingsRepository::get_vocabulary_config(pool)
             .await
             .ok()
             .flatten()
             .unwrap_or_default()
-            .corrections()
     };
-    let segments = create_transcript_segments(&all_transcripts, &corrections);
+    let vocab_terms = vocab.term_texts();
+    if !vocab_terms.is_empty() {
+        all_transcripts
+            .retain(|(text, _, _, _)| !crate::vocabulary::is_vocabulary_echo(text, &vocab_terms));
+    }
+    let segments = create_transcript_segments(&all_transcripts, &vocab.corrections());
 
     // Wrap delete+insert+update in a transaction to prevent data loss
     let pool = app_state.db_manager.pool();

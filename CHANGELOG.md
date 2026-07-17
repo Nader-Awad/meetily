@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.6.5 — 2026-07-17
+
+- **Fix: custom vocabulary no longer leaks "phantom" lines into the transcript.**
+  Adding vocabulary *terms* (e.g. Snyk, NeoHive, Logilica) biases Whisper through
+  its prompt — but on near-silent moments Whisper could echo that prompt back, so
+  the live transcript (and Retranscribe/Import) sometimes showed spurious lines
+  that were just your terms listed out. Those echoes are now detected and dropped
+  on every path, while real speech (and a genuine mention of a term) is untouched.
+
 ## v0.6.4 — 2026-07-17
 
 - **Teach Meetily your vocabulary, so it stops mangling names.** A new

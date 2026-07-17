@@ -274,34 +274,50 @@ pub fn start_transcription_task<R: Runtime>(
 
                                         // Emit transcript update with NEW recording-relative timestamps
 
-                                        // Apply the custom vocabulary correction dictionary using the
-                                        // hot-path global (per-chunk; no DB access on the live path).
-                                        let transcript = {
-                                            let cfg = crate::get_vocabulary_config_internal();
-                                            crate::vocabulary::apply_corrections(&transcript, &cfg.corrections())
-                                        };
+                                        // Apply the custom vocabulary dictionary on the hot-path
+                                        // global (per-chunk; no DB access on the live path).
+                                        let vocab_cfg = crate::get_vocabulary_config_internal();
 
-                                        let update = TranscriptUpdate {
-                                            text: transcript,
-                                            timestamp: format_current_timestamp(), // Wall-clock for reference
-                                            source: "Audio".to_string(),
-                                            sequence_id,
-                                            chunk_start_time: chunk_timestamp, // Legacy compatibility
-                                            is_partial,
-                                            confidence: confidence_opt.unwrap_or(0.85), // Default for providers without confidence
-                                            // NEW: Recording-relative timestamps for sync
-                                            audio_start_time,
-                                            audio_end_time,
-                                            duration: chunk_duration,
-                                            speaker,
-                                        };
-
-                                        if let Err(e) = app_clone.emit("transcript-update", &update)
-                                        {
-                                            error!(
-                                                "Worker {}: Failed to emit transcript update: {}",
-                                                worker_id, e
+                                        // Suppress Whisper initial_prompt echoes: on low/no-speech
+                                        // chunks Whisper can hallucinate the custom-vocabulary terms
+                                        // verbatim (e.g. "NeoHive, Logilica, Snyk"). Drop any output
+                                        // that is nothing but the terms echoed back.
+                                        if crate::vocabulary::is_vocabulary_echo(
+                                            &transcript,
+                                            &vocab_cfg.term_texts(),
+                                        ) {
+                                            log::debug!(
+                                                "Worker {}: suppressed vocabulary-prompt echo: {:?}",
+                                                worker_id, transcript
                                             );
+                                        } else {
+                                            let transcript = crate::vocabulary::apply_corrections(
+                                                &transcript,
+                                                &vocab_cfg.corrections(),
+                                            );
+
+                                            let update = TranscriptUpdate {
+                                                text: transcript,
+                                                timestamp: format_current_timestamp(), // Wall-clock for reference
+                                                source: "Audio".to_string(),
+                                                sequence_id,
+                                                chunk_start_time: chunk_timestamp, // Legacy compatibility
+                                                is_partial,
+                                                confidence: confidence_opt.unwrap_or(0.85), // Default for providers without confidence
+                                                // NEW: Recording-relative timestamps for sync
+                                                audio_start_time,
+                                                audio_end_time,
+                                                duration: chunk_duration,
+                                                speaker,
+                                            };
+
+                                            if let Err(e) = app_clone.emit("transcript-update", &update)
+                                            {
+                                                error!(
+                                                    "Worker {}: Failed to emit transcript update: {}",
+                                                    worker_id, e
+                                                );
+                                            }
                                         }
                                         // PERFORMANCE: Removed verbose logging of every emission
                                     } else if !transcript.trim().is_empty() && should_log_this_chunk
