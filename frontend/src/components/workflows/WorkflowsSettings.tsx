@@ -9,14 +9,37 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Plus, Pencil, Trash2, Eye, EyeOff } from 'lucide-react';
 import { useWorkflows } from '@/hooks/meeting-details/useWorkflows';
+import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 import { WorkflowEditor } from './WorkflowEditor';
+import { TemplateEditor } from './TemplateEditor';
 import { NeoHiveAuthConfig, NeoHiveSettings, ObsidianSettings, Workflow } from '@/types/workflow';
+import { Template, TemplateInfo } from '@/types/template';
 
 const DEFAULT_ENDPOINT = 'https://neohive.logilica.com/projects/e95faa80-9092-478d-98b0-19ef8158efb8/mcp';
 
 export function WorkflowsSettings() {
   const { workflows, isLoading, saveWorkflow, deleteWorkflow } = useWorkflows();
   const [editing, setEditing] = useState<Workflow | 'new' | null>(null);
+
+  const { availableTemplates, refresh: refreshTemplates } = useTemplates();
+  const [tplEdit, setTplEdit] = useState<null | 'new' | { id: string; template: Template; idFixed: boolean }>(null);
+
+  const startDuplicate = async (info: TemplateInfo) => {
+    try {
+      const template = await invoke<Template>('api_get_template', { templateId: info.id });
+      setTplEdit({ id: `${info.id}_custom`, template, idFixed: false });
+    } catch (e) { toast.error('Failed to load template'); console.error(e); }
+  };
+  const startEdit = async (info: TemplateInfo) => {
+    try {
+      const template = await invoke<Template>('api_get_template', { templateId: info.id });
+      setTplEdit({ id: info.id, template, idFixed: true });
+    } catch (e) { toast.error('Failed to load template'); console.error(e); }
+  };
+  const deleteTemplate = async (info: TemplateInfo) => {
+    try { await invoke('api_delete_custom_template', { templateId: info.id }); toast.success('Template deleted'); await refreshTemplates(); }
+    catch (e) { toast.error(typeof e === 'string' ? e : 'Failed to delete template'); console.error(e); }
+  };
 
   // NeoHive connection (auth method + method-specific fields)
   const [neo, setNeo] = useState<NeoHiveSettings>({
@@ -236,6 +259,41 @@ export function WorkflowsSettings() {
         {!isLoading && workflows.length === 0 && editing === null && (
           <p className="text-sm text-muted-foreground">No workflows yet. Create one to run summaries in different ways.</p>
         )}
+      </section>
+
+      {/* Templates */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="font-medium">Templates</h3>
+          {tplEdit === null && <Button size="sm" onClick={() => setTplEdit('new')}><Plus className="h-4 w-4 mr-1" /> New template</Button>}
+        </div>
+
+        {tplEdit === 'new' && (
+          <TemplateEditor onSaved={() => { setTplEdit(null); refreshTemplates(); }} onCancel={() => setTplEdit(null)} />
+        )}
+        {tplEdit !== null && tplEdit !== 'new' && (
+          <TemplateEditor
+            initialId={tplEdit.id}
+            initialTemplate={tplEdit.template}
+            idFixed={tplEdit.idFixed}
+            onSaved={() => { setTplEdit(null); refreshTemplates(); }}
+            onCancel={() => setTplEdit(null)}
+          />
+        )}
+
+        {tplEdit === null && availableTemplates.map((t) => (
+          <div key={t.id} className="flex items-center justify-between border rounded-lg p-3">
+            <div className="text-sm">
+              <span className="font-medium">{t.name}</span>{' '}
+              <span className="text-muted-foreground">({t.id}{t.isCustom ? ', custom' : ', built-in'})</span>
+            </div>
+            <div className="flex gap-1">
+              <Button variant="ghost" size="sm" onClick={() => startDuplicate(t)}>Duplicate</Button>
+              {t.isCustom && <Button variant="ghost" size="icon" aria-label="Edit template" onClick={() => startEdit(t)}><Pencil className="h-4 w-4" /></Button>}
+              {t.isCustom && <Button variant="ghost" size="icon" aria-label="Delete template" onClick={() => deleteTemplate(t)}><Trash2 className="h-4 w-4" /></Button>}
+            </div>
+          </div>
+        ))}
       </section>
     </div>
   );
