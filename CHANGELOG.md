@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.6 — 2026-07-17
+
+- **Create and edit summary templates in the app.** Settings → Workflows now has a
+  **Templates** manager: build a template from scratch, or **Duplicate** any
+  built-in (Daily Standup, Technical Decisions, …) as a starting point, then edit
+  its sections in a simple form (title, instruction, format, optional table
+  layout) — no more hand-editing JSON files on disk. Custom templates show up
+  everywhere templates are used, including the Workflow editor's picker, and can
+  be edited or deleted anytime.
+
 ## v0.6.5 — 2026-07-17
 
 - **Fix: custom vocabulary no longer leaks "phantom" lines into the transcript.**
