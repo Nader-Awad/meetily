@@ -219,12 +219,70 @@ pub fn prepend_glossary(custom_prompt: String, entries: &[(String, String)], max
     }
 }
 
+/// True if `text` is nothing but custom-vocabulary terms echoed back — a known
+/// Whisper `initial_prompt` hallucination on low/no-speech chunks (the prompt
+/// leaks into the output verbatim). Requires the text to consist ENTIRELY of
+/// term words AND to contain at least two distinct term words, so a genuine
+/// one-off mention of a single term inside real speech is never dropped.
+pub fn is_vocabulary_echo(text: &str, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return false;
+    }
+    fn tokenize(s: &str) -> Vec<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(|w| w.to_string())
+            .collect()
+    }
+    let text_tokens = tokenize(text);
+    if text_tokens.is_empty() {
+        return false;
+    }
+    let mut term_words: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for term in terms {
+        for w in tokenize(term) {
+            term_words.insert(w);
+        }
+    }
+    if term_words.is_empty() {
+        return false;
+    }
+    // Every word in the text must be a term word...
+    if !text_tokens.iter().all(|w| term_words.contains(w)) {
+        return false;
+    }
+    // ...and at least two distinct term words must be present (so a lone term
+    // spoken inside otherwise-empty output isn't mistaken for an echo).
+    let distinct: std::collections::HashSet<&String> = text_tokens.iter().collect();
+    distinct.len() >= 2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn corr(from: &str, to: &str, cs: bool) -> Correction {
         Correction { from: from.into(), to: to.into(), case_sensitive: cs }
+    }
+
+    #[test]
+    fn detects_vocabulary_echo() {
+        let terms = vec!["NeoHive".to_string(), "Logilica".to_string(), "Snyk".to_string()];
+        // The reported phantom line (Whisper echoing the initial_prompt verbatim).
+        assert!(is_vocabulary_echo("NeoHive, Logilica, Snyk", &terms));
+        // Reordered / subset echo with >= 2 distinct terms.
+        assert!(is_vocabulary_echo("snyk logilica", &terms));
+        // Real speech that merely contains a term is kept.
+        assert!(!is_vocabulary_echo("Otherwise with Snyk, I need to generate PRs", &terms));
+        // A lone single-term mention is kept (only >= 2 distinct terms is an echo).
+        assert!(!is_vocabulary_echo("Snyk", &terms));
+        assert!(!is_vocabulary_echo("", &terms));
+        // No terms configured -> never an echo.
+        assert!(!is_vocabulary_echo("NeoHive, Logilica, Snyk", &[]));
+        // Multi-word term echoed back.
+        let multi = vec!["near hive".to_string()];
+        assert!(is_vocabulary_echo("near hive", &multi));
     }
 
     #[test]
